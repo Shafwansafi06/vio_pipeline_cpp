@@ -1,0 +1,24 @@
+{
+  "dataset": "EuRoC MH_01_easy.bag",
+  "ground_truth": "/leica/position (Leica MS50, position-only)",
+  "trajectory_length_m": 80.3,
+  "alignment": "Umeyama, position-only",
+  "dod": {
+    "ate_rmse_se3_m": 0.3933,
+    "ate_rmse_sim3_m": 0.3612,
+    "sim3_scale": 0.964,
+    "init": "static, wait_for_jerk=false, init_imu_thresh=0.25, still window at t~21s",
+    "matched_poses": 2712,
+    "mean_tracking_ms": 1.556,
+    "mean_estimator_ms": 3.585
+  },
+  "official_openvins": {
+    "ate_rmse_se3_m": 0.1333,
+    "ate_rmse_sim3_m": 0.1261,
+    "sim3_scale": 1.010,
+    "init": "dynamic MLE (init_dyn_use=true), initialized at t~3s in 0.13s",
+    "matched_poses": 3018,
+    "note": "official static/jerk init FAILS on MH_01 (no clean stationary-then-jerk start); requires the dynamic initializer"
+  },
+  "config_parity": "identical estimator params, calibration, noise, feat_rep across both; only the initializer differs (DOD lacks the dynamic MLE initializer)"
+}

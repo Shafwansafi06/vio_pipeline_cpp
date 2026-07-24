@@ -1,0 +1,19 @@
+# Build outputs
+/build
+/build-*/
+*.o
+*.a
+*.so
+*.egg-info/
+
+# Python
+__pycache__/
+*.pyc
+
+# Editor / backup
+*.orig
+*.swp
+.DS_Store
+
+# Local tooling
+.claude/

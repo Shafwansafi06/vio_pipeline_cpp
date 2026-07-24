@@ -1,0 +1,16 @@
+%YAML:1.0
+
+cam0:
+  T_cam_imu: #rotation from camera to IMU R_CtoI, position of camera in IMU p_CinI
+    - [0.00823361, 0.99993117, -0.00835878, 0.07818894]
+    - [0.99994634, -0.00828572, -0.00621861, 0.01111369]
+    - [-0.00628744, -0.00830713, -0.99994573, -0.22463491]
+    - [0.0, 0.0, 0.0, 1.0]
+  cam_overlaps: []
+  camera_model: pinhole
+  distortion_coeffs: [-0.04294162755219891, 0.00619030764115037, -0.008378564253699376, 0.0028536212242863228]
+  distortion_model: equidistant
+  intrinsics: [701.9297959261883, 701.5704727888331, 647.7796412420897, 353.10369107974674] #fu, fv, cu, cv
+  resolution: [1280, 720]
+  rostopic: /usb_cam/image_raw
+  timeshift_cam_imu: -0.07358109746682885

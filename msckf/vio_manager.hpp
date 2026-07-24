@@ -1,0 +1,94 @@
+#pragma once
+#include "state.hpp"
+#include "propagator.hpp"
+#include "updaters.hpp"
+#include "hover_detector.hpp"
+#include "../core/feature.hpp"
+#include "../core/cam.hpp"
+#include "../core/sensor_data.hpp"
+#include "../initialize/initialization.hpp"
+
+namespace msckf {
+
+struct VioManagerOptions {
+    double gravity_mag = 9.81;
+    StateOptions state_opt;
+    initialize::InitializerOptions init_opt;
+    PropagatorNoises noises;
+    UpdaterOptions updater_opt;
+    UpdaterOptions slam_updater_opt;
+    UpdaterOptions aruco_updater_opt;
+    core::FeatureInitializerOptions feat_init_opt;
+    // SLAM (delayed anchored inverse-depth landmark) updater. The Jacobians
+    // are verified correct (tests/verify_slam_jacobians.cpp), but the
+    // integration still has an unresolved robustness bug -- a near-degenerate
+    // landmark can corrupt the covariance under real (noisy) tracking,
+    // observed as either a hard EKFPropagation assert or, with a stricter
+    // chi2 gate, catastrophic silent divergence. Left off by default; the
+    // MSCKF-only path is the verified 0.685 m ATE baseline on circle.bag.
+    bool enable_slam = false;
+    // Init trigger: true = wait for the takeoff "jerk" (still->moving), matching
+    // official's default; works when the sequence has a clear stationary start
+    // then a distinct jerk (KAIST). EuRoC MH's takeoff is too gentle for the
+    // jerk gate, so it needs false (init as soon as the platform is still).
+    bool init_wait_for_jerk = true;
+    // Whether to attempt the zero-velocity update at all. Official OpenVINS's
+    // own kaist_vio/estimator_config.yaml ships `try_zupt: false` for this
+    // dataset; a slow, gentle circular flight can look "stationary enough"
+    // to a IMU-jerk/disparity gate far more often than it should, freezing
+    // propagation on a large fraction of frames and producing a badly wrong
+    // trajectory shape (not just extra drift). Default true (matches the
+    // pre-existing behavior) but every runner config should set this
+    // explicitly to match whatever the reference implementation uses for
+    // that dataset.
+    bool enable_zupt = true;
+    // Kottas/Wu/Roumeliotis bearing-vector hover classifier + FIFO/LIFO
+    // clone-window switching (msckf/hover_detector.hpp). Independent of
+    // enable_zupt -- this replaces Python v2's IMU-velocity/disparity
+    // hover heuristic with the paper's rotation-compensated bearing
+    // residual test, which does not depend on getting IMU noise/threshold
+    // tuning right to detect a real hover.
+    bool enable_hover_detection = false;
+    HoverDetectorOptions hover_opt;
+    double zupt_max_velocity = 0.1;
+    double zupt_noise_multiplier = 1.0;
+    double zupt_max_disparity = 1.0;
+    core::CameraModel cam_models[2];
+    // [qx,qy,qz,qw,tx,ty,tz], representing Kalibr T_cam_imu.
+    double camera_extrinsics[2][7] = {
+        {0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0},
+        {0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0}
+    };
+    double calib_camimu_dt = 0.0;
+    int num_cameras = 1;
+};
+
+struct VioManagerData {
+    VioManagerOptions params;
+    State state;
+    PropagatorData prop;
+    UpdaterMSCKFData updater_msckf;
+    UpdaterSLAMData updater_slam;
+    UpdaterZeroVelocityData updater_zupt;
+    HoverDetectorData hover_detector;
+    core::FeatureDatabase db;
+    core::ImuData imu_buffer[10000];
+    int imu_count = 0;
+    bool is_initialized = false;
+    double initialized_time = -1.0;
+    int init_attempt = 0;
+};
+
+void init_vio_manager(VioManagerData& vio, const VioManagerOptions& params);
+void feed_measurement_imu(VioManagerData& vio, const core::ImuData& message);
+void feed_measurement_camera_tracks(VioManagerData& vio, double timestamp, const core::Feature* tracks, int track_count);
+bool try_to_initialize(VioManagerData& vio);
+
+inline bool is_initialized(const VioManagerData& vio) { return vio.is_initialized; }
+inline double initialized_time(const VioManagerData& vio) { return vio.initialized_time; }
+inline const State& get_state(const VioManagerData& vio) { return vio.state; }
+inline State& get_state(VioManagerData& vio) { return vio.state; }
+inline const core::FeatureDatabase& get_db(const VioManagerData& vio) { return vio.db; }
+inline core::FeatureDatabase& get_db(VioManagerData& vio) { return vio.db; }
+
+} // namespace msckf

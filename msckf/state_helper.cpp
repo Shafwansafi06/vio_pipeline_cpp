@@ -1,0 +1,588 @@
+#include "state_helper.hpp"
+#include "../type/quat_ops.hpp"
+#include <Eigen/Dense>
+#include <iostream>
+#include <cassert>
+#include <cmath>
+
+namespace msckf {
+
+type::Variable get_imu_pose(const type::Variable& imu) {
+    type::Variable pose;
+    type::init_posejpl(pose);
+    for (int i = 0; i < 7; ++i) {
+        pose.value[i] = imu.value[i];
+        pose.fej[i] = imu.fej[i];
+    }
+    pose.id = imu.id;
+    return pose;
+}
+
+// Wilson-Hilferty approximation for Chi-Square 95% quantile
+static double chi2_ppf_95(int dof) {
+    if (dof <= 0) return 0.0;
+    if (dof == 1) return 3.841;
+    if (dof == 2) return 5.991;
+    if (dof == 3) return 7.815;
+    if (dof == 4) return 9.488;
+    if (dof == 5) return 11.070;
+    double k = static_cast<double>(dof);
+    double term = 1.0 - 2.0 / (9.0 * k);
+    double sd = std::sqrt(2.0 / (9.0 * k));
+    double z = 1.64485362695;
+    return k * std::pow(term + z * sd, 3.0);
+}
+
+void EKFPropagation(State& state, type::Variable** order_NEW, int num_NEW,
+                                 type::Variable** order_OLD, int num_OLD,
+                                 const Eigen::Ref<const Eigen::MatrixXd>& Phi,
+                                 const Eigen::Ref<const Eigen::MatrixXd>& Q) {
+    if (num_NEW == 0 || num_OLD == 0) {
+        std::cerr << "EKFPropagation() - Called with empty variables!\n";
+        std::exit(1);
+    }
+    
+    int size_order_NEW = 0;
+    for (int i = 0; i < num_NEW; ++i) {
+        if (i < num_NEW - 1) {
+            assert(order_NEW[i]->id + order_NEW[i]->size == order_NEW[i+1]->id);
+        }
+        size_order_NEW += order_NEW[i]->size;
+    }
+    
+    int size_order_OLD = 0;
+    for (int i = 0; i < num_OLD; ++i) {
+        size_order_OLD += order_OLD[i]->size;
+    }
+    
+    assert(size_order_NEW == Phi.rows());
+    assert(size_order_OLD == Phi.cols());
+    assert(size_order_NEW == Q.rows());
+    assert(size_order_NEW == Q.cols());
+    
+    int total_size = state.cov_size;
+    assert(total_size <= STATE_COV_CAPACITY);
+    assert(size_order_NEW <= IMU_ERROR_STATE_CAPACITY);
+    alignas(64) static thread_local double cov_phi_t_storage[
+        STATE_COV_CAPACITY * IMU_ERROR_STATE_CAPACITY];
+    Eigen::Map<Eigen::MatrixXd> cov_phi_t(
+        cov_phi_t_storage, total_size, size_order_NEW);
+    cov_phi_t.setZero();
+    
+    int current_it = 0;
+    for (int i = 0; i < num_OLD; ++i) {
+        type::Variable* var = order_OLD[i];
+        int var_id = var->id;
+        int var_sz = var->size;
+        
+        const auto phi_block = Phi.block(0, current_it, size_order_NEW, var_sz);
+        const auto cov_block = state.Cov.block(0, var_id, total_size, var_sz);
+        
+        cov_phi_t.noalias() +=
+            cov_block * phi_block.transpose();
+        current_it += var_sz;
+    }
+    
+    alignas(64) static thread_local double phi_cov_phi_t_storage[
+        IMU_ERROR_STATE_CAPACITY * IMU_ERROR_STATE_CAPACITY];
+    Eigen::Map<Eigen::MatrixXd> phi_cov_phi_t(
+        phi_cov_phi_t_storage, size_order_NEW, size_order_NEW);
+    phi_cov_phi_t = Q;
+    for (int row = 0; row < size_order_NEW; ++row) {
+        for (int col = row + 1; col < size_order_NEW; ++col) {
+            const double symmetric = 0.5 *
+                (phi_cov_phi_t(row, col) + phi_cov_phi_t(col, row));
+            phi_cov_phi_t(row, col) = symmetric;
+            phi_cov_phi_t(col, row) = symmetric;
+        }
+    }
+    
+    current_it = 0;
+    for (int i = 0; i < num_OLD; ++i) {
+        type::Variable* var = order_OLD[i];
+        int var_id = var->id;
+        int var_sz = var->size;
+        
+        const auto phi_block = Phi.block(0, current_it, size_order_NEW, var_sz);
+        const auto cov_phit_block = cov_phi_t.block(var_id, 0, var_sz, size_order_NEW);
+        
+        phi_cov_phi_t.noalias() +=
+            phi_block * cov_phit_block;
+        current_it += var_sz;
+    }
+    
+    int start_id = order_NEW[0]->id;
+    int phi_size = Phi.rows();
+    
+    state.Cov.block(start_id, 0, phi_size, total_size) =
+        cov_phi_t.transpose();
+    state.Cov.block(0, start_id, total_size, phi_size) =
+        cov_phi_t;
+    state.Cov.block(start_id, start_id, phi_size, phi_size) =
+        phi_cov_phi_t;
+    
+    // Ensure symmetry
+    for (int row = 0; row < total_size; ++row) {
+        for (int col = row + 1; col < total_size; ++col) {
+            const double symmetric = 0.5 * (state.Cov(row, col) + state.Cov(col, row));
+            state.Cov(row, col) = symmetric;
+            state.Cov(col, row) = symmetric;
+        }
+    }
+    
+    for (int i = 0; i < total_size; ++i) {
+        if (state.Cov(i, i) < 0.0) {
+            std::cerr << "EKFPropagation() - diagonal at " << i << " is " << state.Cov(i, i) << "\n";
+            std::exit(1);
+        }
+    }
+}
+
+void EKFUpdate(State& state, type::Variable** H_order, int num_H,
+                            const Eigen::MatrixXd& H, const Eigen::VectorXd& res,
+                            const Eigen::MatrixXd& R) {
+    assert(res.size() == R.rows());
+    assert(H.rows() == res.size());
+    
+    int total_size = state.cov_size;
+    Eigen::MatrixXd M_a = Eigen::MatrixXd::Zero(total_size, res.size());
+    
+    int current_it = 0;
+    int H_id[100];
+    for (int i = 0; i < num_H; ++i) {
+        H_id[i] = current_it;
+        current_it += H_order[i]->size;
+    }
+    
+    for (int i = 0; i < state.num_variables; ++i) {
+        type::Variable* var = state.variables[i];
+        int var_id = var->id;
+        int var_sz = var->size;
+        
+        Eigen::MatrixXd M_i = Eigen::MatrixXd::Zero(var_sz, res.size());
+        for (int k = 0; k < num_H; ++k) {
+            type::Variable* meas_var = H_order[k];
+            Eigen::MatrixXd cov_block = state.Cov.block(var_id, meas_var->id, var_sz, meas_var->size);
+            Eigen::MatrixXd H_block = H.block(0, H_id[k], H.rows(), meas_var->size);
+            
+            M_i += cov_block * H_block.transpose();
+        }
+        M_a.block(var_id, 0, var_sz, res.size()) = M_i;
+    }
+    
+    Eigen::MatrixXd P_small = get_marginal_covariance(state, H_order, num_H);
+    Eigen::MatrixXd S = H * P_small * H.transpose() + R;
+    S = 0.5 * (S + S.transpose());
+    
+    // Add jitter
+    for (int i = 0; i < S.rows(); ++i) {
+        S(i, i) += 1e-9;
+    }
+    
+    Eigen::MatrixXd K;
+    Eigen::LDLT<Eigen::MatrixXd> ldlt(S);
+    if (ldlt.info() == Eigen::Success) {
+        K = M_a * ldlt.solve(Eigen::MatrixXd::Identity(S.rows(), S.cols()));
+    } else {
+        Eigen::CompleteOrthogonalDecomposition<Eigen::MatrixXd> cod(S);
+        K = M_a * cod.pseudoInverse();
+    }
+    
+    Eigen::MatrixXd update_term = K * M_a.transpose();
+    state.Cov.block(0, 0, total_size, total_size) -= update_term;
+    state.Cov.block(0, 0, total_size, total_size) = 0.5 * (state.Cov.block(0, 0, total_size, total_size) + state.Cov.block(0, 0, total_size, total_size).transpose());
+    
+    // Floor negative variances
+    double min_var = 1e-12;
+    for (int i = 0; i < total_size; ++i) {
+        if (state.Cov(i, i) < min_var) {
+            state.Cov(i, i) = min_var;
+        }
+    }
+    
+    Eigen::VectorXd dx = K * res;
+    
+    for (int i = 0; i < state.num_variables; ++i) {
+        type::Variable* var = state.variables[i];
+        Eigen::VectorXd update_vec = dx.segment(var->id, var->size);
+        type::update_variable(*var, update_vec);
+    }
+}
+
+void set_initial_covariance(State& state, const Eigen::MatrixXd& covariance,
+                                         type::Variable** order, int num_order) {
+    int i_index = 0;
+    for (int i = 0; i < num_order; ++i) {
+        int k_index = 0;
+        for (int k = 0; k < num_order; ++k) {
+            int block_rows = order[i]->size;
+            int block_cols = order[k]->size;
+            
+            Eigen::MatrixXd src_block = covariance.block(i_index, k_index, block_rows, block_cols);
+            state.Cov.block(order[i]->id, order[k]->id, block_rows, block_cols) = src_block;
+            
+            k_index += block_cols;
+        }
+        i_index += order[i]->size;
+    }
+    
+    int total_size = state.cov_size;
+    state.Cov.block(0, 0, total_size, total_size) = 0.5 * (state.Cov.block(0, 0, total_size, total_size) + state.Cov.block(0, 0, total_size, total_size).transpose());
+}
+
+Eigen::MatrixXd get_marginal_covariance(const State& state, type::Variable** small_variables, int num_small) {
+    int cov_size = 0;
+    for (int i = 0; i < num_small; ++i) {
+        cov_size += small_variables[i]->size;
+    }
+    
+    Eigen::MatrixXd Small_cov = Eigen::MatrixXd::Zero(cov_size, cov_size);
+    int i_index = 0;
+    for (int i = 0; i < num_small; ++i) {
+        int rows = small_variables[i]->size;
+        int k_index = 0;
+        for (int k = 0; k < num_small; ++k) {
+            int cols = small_variables[k]->size;
+            
+            Eigen::MatrixXd src_block = state.Cov.block(small_variables[i]->id, small_variables[k]->id, rows, cols);
+            Small_cov.block(i_index, k_index, rows, cols) = src_block;
+            
+            k_index += cols;
+        }
+        i_index += rows;
+    }
+    return Small_cov;
+}
+
+Eigen::MatrixXd get_full_covariance(const State& state) {
+    return state.Cov.block(0, 0, state.cov_size, state.cov_size);
+}
+
+void marginalize(State& state, type::Variable* marg) {
+    bool found = false;
+    for (int i = 0; i < state.num_variables; ++i) {
+        if (state.variables[i] == marg) {
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        std::cerr << "marginalize() - Called on variable not in state!\n";
+        std::exit(1);
+    }
+    
+    int marg_size = marg->size;
+    int marg_id = marg->id;
+    int old_dim = state.cov_size;
+    int x2_size = old_dim - marg_id - marg_size;
+    int new_dim = old_dim - marg_size;
+    
+    Eigen::MatrixXd Cov_new = Eigen::MatrixXd::Zero(new_dim, new_dim);
+    
+    if (marg_id > 0) {
+        Cov_new.block(0, 0, marg_id, marg_id) = state.Cov.block(0, 0, marg_id, marg_id);
+    }
+    if (marg_id > 0 && x2_size > 0) {
+        Cov_new.block(0, marg_id, marg_id, x2_size) = state.Cov.block(0, marg_id + marg_size, marg_id, x2_size);
+        Cov_new.block(marg_id, 0, x2_size, marg_id) = Cov_new.block(0, marg_id, marg_id, x2_size).transpose();
+    }
+    if (x2_size > 0) {
+        Cov_new.block(marg_id, marg_id, x2_size, x2_size) = state.Cov.block(marg_id + marg_size, marg_id + marg_size, x2_size, x2_size);
+    }
+    
+    state.Cov.block(0, 0, new_dim, new_dim) = Cov_new;
+    state.cov_size = new_dim;
+    
+    int write_idx = 0;
+    for (int i = 0; i < state.num_variables; ++i) {
+        type::Variable* var = state.variables[i];
+        if (var != marg) {
+            if (var->id > marg_id) {
+                var->id -= marg_size;
+            }
+            state.variables[write_idx++] = var;
+        }
+    }
+    state.num_variables = write_idx;
+    marg->id = -1;
+}
+
+type::Variable* clone_var(State& state, type::Variable* variable_to_clone) {
+    int total_size = variable_to_clone->size;
+    int old_size = state.cov_size;
+    int new_loc = old_size;
+    
+    // Grow covariance
+    state.Cov.block(old_size, 0, total_size, old_size + total_size).setZero();
+    state.Cov.block(0, old_size, old_size + total_size, total_size).setZero();
+    
+    type::Variable* new_clone = nullptr;
+    
+    for (int k = 0; k < state.num_variables; ++k) {
+        type::Variable* var = state.variables[k];
+        if (var->id == variable_to_clone->id) {
+            int old_loc = var->id;
+            
+            state.Cov.block(new_loc, new_loc, total_size, total_size) = state.Cov.block(old_loc, old_loc, total_size, total_size);
+            state.Cov.block(0, new_loc, old_size, total_size) = state.Cov.block(0, old_loc, old_size, total_size);
+            state.Cov.block(new_loc, 0, total_size, old_size) = state.Cov.block(old_loc, 0, total_size, old_size);
+            
+            if (variable_to_clone->type == type::VariableType::POSEJPL) {
+                if (state.num_clones < 20) {
+                    new_clone = &state.clones_IMU[state.num_clones++];
+                    *new_clone = type::clone_variable(*variable_to_clone);
+                    new_clone->id = new_loc;
+                }
+            }
+            break;
+        }
+    }
+    
+    if (new_clone) {
+        state.variables[state.num_variables++] = new_clone;
+        state.cov_size += total_size;
+    }
+    return new_clone;
+}
+
+bool initialize(State& state, type::Variable* new_variable,
+                             type::Variable** H_order, int num_H,
+                             const Eigen::MatrixXd& H_R, const Eigen::MatrixXd& H_L,
+                             const Eigen::MatrixXd& R, const Eigen::VectorXd& res,
+                             double chi_2_mult) {
+    for (int i = 0; i < state.num_variables; ++i) {
+        if (state.variables[i] == new_variable) {
+            std::cerr << "initialize() - Variable already in state!\n";
+            std::exit(1);
+        }
+    }
+    
+    int new_var_size = new_variable->size;
+    assert(new_var_size == H_L.cols());
+    
+    Eigen::MatrixXd H_L_wk = H_L;
+    Eigen::MatrixXd H_R_wk = H_R;
+    Eigen::VectorXd res_wk = res;
+    
+    // QR decomposition
+    Eigen::HouseholderQR<Eigen::MatrixXd> qr(H_L_wk);
+    Eigen::MatrixXd Q_mat = qr.householderQ();
+    
+    Eigen::MatrixXd H_L_qr = Q_mat.transpose() * H_L_wk;
+    Eigen::MatrixXd H_R_qr = Q_mat.transpose() * H_R_wk;
+    Eigen::VectorXd res_qr = Q_mat.transpose() * res_wk;
+    
+    // Separate
+    Eigen::MatrixXd Hxinit = H_R_qr.topRows(new_var_size);
+    Eigen::MatrixXd H_finit = H_L_qr.topLeftCorner(new_var_size, new_var_size);
+    Eigen::VectorXd resinit = res_qr.head(new_var_size);
+    Eigen::MatrixXd Rinit = R.block(0, 0, new_var_size, new_var_size);
+    
+    int up_rows = H_R_qr.rows() - new_var_size;
+    Eigen::MatrixXd Hup = H_R_qr.bottomRows(up_rows);
+    Eigen::VectorXd resup = res_qr.tail(up_rows);
+    Eigen::MatrixXd Rup = R.block(new_var_size, new_var_size, up_rows, up_rows);
+    
+    // Chi-Square Test
+    Eigen::MatrixXd P_up = get_marginal_covariance(state, H_order, num_H);
+    Eigen::MatrixXd S = Hup * P_up * Hup.transpose() + Rup;
+    S = 0.5 * (S + S.transpose());
+    for (int i = 0; i < S.rows(); ++i) {
+        S(i, i) += 1e-9;
+    }
+    
+    double chi2_val = 99999.9;
+    Eigen::LDLT<Eigen::MatrixXd> ldlt(S);
+    if (ldlt.info() == Eigen::Success) {
+        chi2_val = resup.dot(ldlt.solve(resup));
+    }
+    
+    int dof = res.size();
+    double chi2_check = chi2_ppf_95(dof);
+    
+    if (chi2_val > chi_2_mult * chi2_check) {
+        return false;
+    }
+    
+    initialize_invertible(state, new_variable, H_order, num_H, Hxinit, H_finit, Rinit, resinit);
+    
+    if (Hup.rows() > 0) {
+        EKFUpdate(state, H_order, num_H, Hup, resup, Rup);
+    }
+    return true;
+}
+
+void initialize_invertible(State& state, type::Variable* new_variable,
+                                       type::Variable** H_order, int num_H,
+                                       const Eigen::MatrixXd& H_R, const Eigen::MatrixXd& H_L,
+                                       const Eigen::MatrixXd& R, const Eigen::VectorXd& res) {
+    for (int i = 0; i < state.num_variables; ++i) {
+        if (state.variables[i] == new_variable) {
+            std::exit(1);
+        }
+    }
+    
+    int oldSize = state.cov_size;
+    int new_var_sz = new_variable->size;
+    int res_sz = res.size();
+    
+    Eigen::MatrixXd M_a = Eigen::MatrixXd::Zero(oldSize, res_sz);
+    int current_it = 0;
+    int H_id[100];
+    for (int i = 0; i < num_H; ++i) {
+        H_id[i] = current_it;
+        current_it += H_order[i]->size;
+    }
+    
+    for (int i = 0; i < state.num_variables; ++i) {
+        type::Variable* var = state.variables[i];
+        Eigen::MatrixXd M_i = Eigen::MatrixXd::Zero(var->size, res_sz);
+        for (int k = 0; k < num_H; ++k) {
+            type::Variable* meas_var = H_order[k];
+            Eigen::MatrixXd cov_block = state.Cov.block(var->id, meas_var->id, var->size, meas_var->size);
+            Eigen::MatrixXd H_R_block = H_R.block(0, H_id[k], H_R.rows(), meas_var->size);
+            
+            M_i += cov_block * H_R_block.transpose();
+        }
+        M_a.block(var->id, 0, var->size, res_sz) = M_i;
+    }
+    
+    Eigen::MatrixXd P_small = get_marginal_covariance(state, H_order, num_H);
+    Eigen::MatrixXd M = H_R * P_small * H_R.transpose() + R;
+    
+    Eigen::MatrixXd H_Linv = H_L.inverse();
+    Eigen::MatrixXd P_LL = H_Linv * M * H_Linv.transpose();
+    
+    int newSize = oldSize + new_var_sz;
+    
+    state.Cov.block(oldSize, 0, new_var_sz, oldSize + new_var_sz).setZero();
+    state.Cov.block(0, oldSize, oldSize + new_var_sz, new_var_sz).setZero();
+    
+    Eigen::MatrixXd cross_term = -M_a * H_Linv.transpose();
+    state.Cov.block(0, oldSize, oldSize, new_var_sz) = cross_term;
+    state.Cov.block(oldSize, 0, new_var_sz, oldSize) = cross_term.transpose();
+    state.Cov.block(oldSize, oldSize, new_var_sz, new_var_sz) = P_LL;
+    
+    Eigen::VectorXd dx = H_Linv * res;
+    type::update_variable(*new_variable, dx);
+    
+    new_variable->id = oldSize;
+    state.variables[state.num_variables++] = new_variable;
+    state.cov_size = newSize;
+}
+
+void augment_clone(State& state, const Eigen::Vector3d& last_w) {
+    // Check timestamp collision
+    for (int i = 0; i < state.num_clones; ++i) {
+        if (state.clones_IMU[i].timestamp == state.timestamp) {
+            std::cerr << "augment_clone() - Clone already exists at timestamp!\n";
+            std::exit(1);
+        }
+    }
+    
+    type::Variable imu_pose = get_imu_pose(state.imu);
+    type::Variable* pose = clone_var(state, &imu_pose);
+    if (!pose) return;
+    
+    pose->timestamp = state.timestamp;
+    
+    if (state.options.do_calib_camera_timeoffset) {
+        Eigen::Matrix<double, 6, 1> dnc_dt = Eigen::Matrix<double, 6, 1>::Zero();
+        dnc_dt.head<3>() = last_w;
+        // IMU velocity: elements [7..10] of imu value
+        Eigen::Vector3d vel(state.imu.value[7], state.imu.value[8], state.imu.value[9]);
+        dnc_dt.tail<3>() = vel;
+        
+        int pose_id = pose->id;
+        int dt_id = state.calib_dt_CAMtoIMU.id;
+        
+        // Col update: Cov[:, pose_id:pose_id+6] += Cov[:, dt_id] * dnc_dt.transpose()
+        Eigen::MatrixXd col_update = state.Cov.block(0, dt_id, state.cov_size, 1) * dnc_dt.transpose();
+        state.Cov.block(0, pose_id, state.cov_size, 6) += col_update;
+        
+        // Row update: Cov[pose_id:pose_id+6, :] += dnc_dt * Cov[dt_id, :]
+        Eigen::MatrixXd row_update = dnc_dt * state.Cov.block(dt_id, 0, 1, state.cov_size);
+        state.Cov.block(pose_id, 0, 6, state.cov_size) += row_update;
+    }
+}
+
+void marginalize_old_clone(State& state) {
+    if (state.num_clones > state.options.max_clone_size) {
+        double marginal_time = margtimestep(state);
+        if (marginal_time == -1.0) return;
+        
+        int idx = -1;
+        for (int i = 0; i < state.num_clones; ++i) {
+            if (state.clones_IMU[i].timestamp == marginal_time) {
+                idx = i;
+                break;
+            }
+        }
+        
+        if (idx != -1) {
+            marginalize(state, &state.clones_IMU[idx]);
+            // Shift remaining clones in clones_IMU array
+            for (int i = idx; i < state.num_clones - 1; ++i) {
+                type::Variable* old_address = &state.clones_IMU[i + 1];
+                state.clones_IMU[i] = state.clones_IMU[i + 1];
+                for (int variable = 0; variable < state.num_variables; ++variable) {
+                    if (state.variables[variable] == old_address) {
+                        state.variables[variable] = &state.clones_IMU[i];
+                        break;
+                    }
+                }
+            }
+            state.num_clones--;
+        }
+    }
+}
+
+void marginalize_lifo_clone(State& state) {
+    // LIFO scheme (Kottas, Wu & Roumeliotis, Sect. III-B): while hovering,
+    // replace the most-recently-added clone with the new one instead of
+    // dropping the oldest, so the generic-motion baseline already in the
+    // window is preserved and the system does not lose observability.
+    // `augment_clone` has already appended the new clone as the last
+    // element; the one to drop is the previous "current" clone, now second
+    // to last.
+    if (state.num_clones > state.options.max_clone_size && state.num_clones >= 2) {
+        const int drop_idx = state.num_clones - 2;
+        marginalize(state, &state.clones_IMU[drop_idx]);
+        type::Variable* old_address = &state.clones_IMU[state.num_clones - 1];
+        state.clones_IMU[drop_idx] = state.clones_IMU[state.num_clones - 1];
+        for (int variable = 0; variable < state.num_variables; ++variable) {
+            if (state.variables[variable] == old_address) {
+                state.variables[variable] = &state.clones_IMU[drop_idx];
+                break;
+            }
+        }
+        state.num_clones--;
+    }
+}
+
+void marginalize_slam(State& state) {
+    int i = 0;
+    while (i < state.num_slam_features) {
+        type::Variable& feat = state.features_SLAM[i];
+        if (feat.should_marg && feat.feat_id > 4 * state.options.max_aruco_features) {
+            marginalize(state, &feat);
+            // Shift remaining features
+            for (int k = i; k < state.num_slam_features - 1; ++k) {
+                type::Variable* old_address = &state.features_SLAM[k + 1];
+                state.features_SLAM[k] = state.features_SLAM[k + 1];
+                for (int variable = 0; variable < state.num_variables; ++variable) {
+                    if (state.variables[variable] == old_address) {
+                        state.variables[variable] = &state.features_SLAM[k];
+                        break;
+                    }
+                }
+            }
+            state.num_slam_features--;
+            // do not increment i since we shifted
+        } else {
+            i++;
+        }
+    }
+}
+
+} // namespace msckf

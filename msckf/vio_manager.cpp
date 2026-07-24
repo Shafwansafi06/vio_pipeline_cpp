@@ -1,0 +1,296 @@
+#include "vio_manager.hpp"
+#include "state_helper.hpp"
+#include "hover_detector.hpp"
+
+namespace msckf {
+
+void init_vio_manager(VioManagerData& vio, const VioManagerOptions& params) {
+    vio.params = params;
+    init_updater_msckf(vio.updater_msckf, params.updater_opt, params.feat_init_opt);
+    init_updater_slam(vio.updater_slam, params.slam_updater_opt, params.aruco_updater_opt, params.feat_init_opt);
+    init_updater_zupt(vio.updater_zupt, params.noises, params.gravity_mag, params.zupt_max_velocity,
+                      params.zupt_noise_multiplier, params.zupt_max_disparity);
+    init_propagator(vio.prop, params.noises, params.gravity_mag);
+    init_hover_detector(vio.hover_detector, params.hover_opt);
+
+    StateOptions opt = params.state_opt;
+    opt.num_cameras = params.num_cameras;
+    
+    init_state(vio.state, opt);
+
+    // Calibration variables are nominal state even when held fixed. Leaving
+    // these at identity silently makes every feature Jacobian geometrically
+    // inconsistent with the tracker calibration.
+    vio.state.calib_dt_CAMtoIMU.value[0] = params.calib_camimu_dt;
+    vio.state.calib_dt_CAMtoIMU.fej[0] = params.calib_camimu_dt;
+    for (int camera = 0; camera < params.num_cameras; ++camera) {
+        for (int k = 0; k < 8; ++k) {
+            vio.state.cam_intrinsics[camera].value[k] = params.cam_models[camera].values[k];
+            vio.state.cam_intrinsics[camera].fej[k] = params.cam_models[camera].values[k];
+        }
+        for (int k = 0; k < 7; ++k) {
+            vio.state.calib_IMUtoCAM[camera].value[k] = params.camera_extrinsics[camera][k];
+            vio.state.calib_IMUtoCAM[camera].fej[k] = params.camera_extrinsics[camera][k];
+        }
+    }
+}
+
+void feed_measurement_imu(VioManagerData& vio, const core::ImuData& message) {
+    if (vio.imu_count < 10000) {
+        // Keep sorted by timestamp
+        int insert_idx = vio.imu_count;
+        while (insert_idx > 0 && vio.imu_buffer[insert_idx - 1].timestamp > message.timestamp) {
+            vio.imu_buffer[insert_idx] = vio.imu_buffer[insert_idx - 1];
+            insert_idx--;
+        }
+        vio.imu_buffer[insert_idx] = message;
+        vio.imu_count++;
+    }
+}
+
+void feed_measurement_camera_tracks(VioManagerData& vio, double timestamp, const core::Feature* tracks, int track_count) {
+    // 1. Update feature database
+    for (int i = 0; i < track_count; ++i) {
+        const core::Feature& tr = tracks[i];
+        for (int m = 0; m < tr.num_measurements; ++m) {
+            core::update_feature(vio.db, tr.featid, tr.measurements[m].timestamp,
+                                 tr.measurements[m].cam_id,
+                                 tr.measurements[m].uv[0], tr.measurements[m].uv[1],
+                                 tr.measurements[m].uv_norm[0], tr.measurements[m].uv_norm[1]);
+        }
+    }
+    
+    // 2. Try to initialize if not yet initialized
+    if (!vio.is_initialized) {
+        try_to_initialize(vio);
+        return;
+    }
+    
+    // 3. Try Zero Velocity Update (ZUPT)
+    bool zupt_success = vio.params.enable_zupt &&
+        try_update_zupt(vio.updater_zupt, vio.state, timestamp, vio.imu_buffer, vio.imu_count, vio.db, true);
+    
+    if (!zupt_success) {
+        const double previous_clone_timestamp =
+            vio.state.num_clones > 0 ? vio.state.clones_IMU[vio.state.num_clones - 1].timestamp : -1.0;
+
+        // Standard MSCKF step: Propagate IMU and augment clone
+        propagate_and_clone(vio.prop, vio.state, timestamp, vio.imu_buffer, vio.imu_count);
+
+        // Hovering classifier (Kottas, Wu & Roumeliotis): rotation-compensated
+        // bearing-vector residual between the two most recent clones, with
+        // hysteresis. Independent of ZUPT/IMU-velocity heuristics.
+        bool hovering = false;
+        if (vio.params.enable_hover_detection && previous_clone_timestamp >= 0.0 &&
+            vio.state.num_clones >= 2) {
+            const type::Variable& prev_clone = vio.state.clones_IMU[vio.state.num_clones - 2];
+            const type::Variable& curr_clone = vio.state.clones_IMU[vio.state.num_clones - 1];
+            // Bearing vectors live in the CAMERA frame (uv_norm), not the IMU
+            // frame -- conjugate the IMU-frame relative rotation by the
+            // camera-IMU extrinsic so it applies to camera-frame bearings.
+            const Eigen::Matrix3d& R_ItoC = vio.state.calib_IMUtoCAM[0].Rot();
+            const Eigen::Matrix3d R_imu_curr_from_prev = curr_clone.Rot() * prev_clone.Rot().transpose();
+            const Eigen::Matrix3d R_curr_from_prev = R_ItoC * R_imu_curr_from_prev * R_ItoC.transpose();
+            hovering = update_hover_detector(vio.hover_detector, vio.db, previous_clone_timestamp,
+                                             timestamp, R_curr_from_prev);
+        }
+
+        // Classify tracked features into: lost (no measurement this frame),
+        // MSCKF-marginal (touching the clone about to be dropped, but not yet
+        // long-lived enough / SLAM capacity full), new SLAM candidates
+        // (long-lived enough and there's room), and existing SLAM landmarks
+        // needing their per-frame update.
+        core::Feature* lost_features[2048];
+        core::Feature* marginal_features[2048];
+        core::Feature* maxtrack_features[2048];
+        core::Feature* slam_update_features[64];
+        int lost_count = 0, marginal_count = 0, maxtrack_count = 0, slam_update_count = 0;
+        const bool clones_full = vio.state.num_clones > vio.state.options.max_clone_size;
+        // The clone actually about to be dropped differs by mode: FIFO drops
+        // the oldest (margtimestep); LIFO drops the previous "current" clone
+        // (second-to-last) instead, per marginalize_lifo_clone.
+        const double marginal_time = hovering && clones_full && vio.state.num_clones >= 2
+            ? vio.state.clones_IMU[vio.state.num_clones - 2].timestamp
+            : margtimestep(vio.state);
+
+        for (int i = 0; i < (int)vio.db.count; ++i) {
+            core::Feature& feat = vio.db.features[i];
+            bool is_lost = true;
+            bool contains_marginal = false;
+            for (int m = 0; m < feat.num_measurements; ++m) {
+                if (feat.measurements[m].timestamp == timestamp) is_lost = false;
+                if (feat.measurements[m].timestamp == marginal_time) contains_marginal = true;
+            }
+            contains_marginal = contains_marginal && clones_full;
+
+            bool is_slam = vio.params.enable_slam;
+            if (is_slam) {
+                is_slam = false;
+                for (int s = 0; s < vio.state.num_slam_features; ++s) {
+                    if (vio.state.features_SLAM[s].feat_id == feat.featid) { is_slam = true; break; }
+                }
+            }
+            if (is_slam) {
+                if (feat.num_measurements >= 1 && slam_update_count < 64) {
+                    slam_update_features[slam_update_count++] = &feat;
+                }
+                continue;
+            }
+
+            if (!(feat.num_measurements >= 2 && (is_lost || contains_marginal))) continue;
+
+            // Stereo doubles the per-frame measurement count, so a feature
+            // that has actually tracked through a full clone window on both
+            // cameras has ~2x max_clone_size measurements, not just 1x.
+            const bool reached_max = feat.num_measurements >= 2 * vio.state.options.max_clone_size;
+            if (vio.params.enable_slam && contains_marginal && reached_max &&
+                vio.state.num_slam_features + maxtrack_count < vio.state.options.max_slam_features &&
+                maxtrack_count < 2048) {
+                maxtrack_features[maxtrack_count++] = &feat;
+            } else if (is_lost) {
+                lost_features[lost_count++] = &feat;
+            } else {
+                marginal_features[marginal_count++] = &feat;
+            }
+        }
+
+        core::Feature* msckf_features[2048];
+        int msckf_count = 0;
+        for (int i = 0; i < lost_count; ++i) msckf_features[msckf_count++] = lost_features[i];
+        for (int i = 0; i < marginal_count; ++i) msckf_features[msckf_count++] = marginal_features[i];
+
+        // NOTE (2026-07-22): tried adding official's max_msckf_in_update
+        // sort+cap here (keep only the longest tracks when count exceeds the
+        // configured cap). Measured effect on real data: msckf_count rarely
+        // exceeds the cap (~17 features/call average, not the ~150 once
+        // assumed), so the cap barely changed the single-shot accept rate
+        // (6.4% -> 8.2%, still far below official's ~70%), and it made ATE
+        // RMSE *worse* on both datasets (circle.bag 0.785->1.043 m,
+        // infinity.bag 1.070->1.306 m). Reverted; not the bottleneck.
+
+        if (msckf_count > 0) {
+            // Every feature fed to the MSCKF update this frame is discarded
+            // afterward (update_msckf marks all of them to_delete=true,
+            // success or failure) -- a strict one-shot attempt, matching
+            // official exactly. The tracker's own persistent per-camera track
+            // state (TrackerData::previous[]) is independent of this
+            // database, so a still-tracked physical point gets a brand-new
+            // measurement history starting next frame via update_feature()'s
+            // "not found -> create" path, instead of retrying triangulation
+            // on the same already-failed accumulated history.
+            update_msckf(vio.updater_msckf, vio.state, msckf_features, msckf_count, vio.params.cam_models);
+            core::cleanup_db(vio.db);
+        }
+
+        if (vio.params.enable_slam) {
+            if (slam_update_count > 0) {
+                update_slam(vio.updater_slam, vio.state, slam_update_features, slam_update_count, vio.params.cam_models);
+                core::cleanup_db(vio.db);
+            }
+
+            if (maxtrack_count > 0) {
+                delayed_init_slam(vio.updater_slam, vio.state, maxtrack_features, maxtrack_count, vio.params.cam_models);
+                core::cleanup_db(vio.db);
+            }
+
+            // Drop SLAM landmarks whose track vanished from the tracker
+            // database or that have repeatedly failed their chi2 gate.
+            for (int s = 0; s < vio.state.num_slam_features; ++s) {
+                type::Variable& lm = vio.state.features_SLAM[s];
+                const core::Feature* still_tracked = core::get_feature(vio.db, lm.feat_id);
+                if (!still_tracked || lm.update_fail_count > 1) lm.should_marg = true;
+            }
+            marginalize_slam(vio.state);
+        }
+
+        // The EKF estimates camera intrinsics into state.cam_intrinsics[],
+        // but every residual/Jacobian computation (get_feature_jacobian_mixed
+        // et al.) reads distortion from vio.params.cam_models -- a separate
+        // buffer written only once at init. Without this resync, the
+        // estimated intrinsics silently drift away from what the filter
+        // actually projects with: the EKF keeps building intrinsics<->pose
+        // cross-covariance and pushing "corrections" that never take effect,
+        // corrupting the trajectory. This is why improving tracker precision
+        // made things WORSE, not better -- lower measurement noise means
+        // each update trusts (and pushes) the bogus intrinsics correlation
+        // harder. Matches official OpenVINS's StateHelper::EKFUpdate, which
+        // copies the estimated intrinsics back into its live camera objects
+        // immediately after every update.
+        if (vio.params.state_opt.do_calib_camera_intrinsics) {
+            for (int camera = 0; camera < vio.params.num_cameras; ++camera) {
+                core::set_camera_values(vio.params.cam_models[camera], vio.state.cam_intrinsics[camera].value);
+            }
+        }
+
+        if (clones_full && marginal_time >= 0.0) {
+            core::cleanup_db_measurements(vio.db, marginal_time);
+        }
+
+        if (vio.params.enable_slam) {
+            // Move any SLAM landmark anchored on the clone about to be
+            // dropped onto the newest clone before marginalizing it away.
+            change_anchors(vio.updater_slam, vio.state);
+        }
+
+        // Marginalize old clones if exceeding sliding window size: FIFO
+        // during generic motion, LIFO during hovering (paper, Sect. III-B) so
+        // the generic-motion baseline already in the window is preserved
+        // instead of being squeezed out by more zero-baseline hover clones.
+        if (hovering) {
+            marginalize_lifo_clone(vio.state);
+        } else {
+            marginalize_old_clone(vio.state);
+        }
+    }
+    
+    // Clean old IMU readings from cache
+    double oldest_clone_time = margtimestep(vio.state);
+    if (oldest_clone_time != -1.0) {
+        int write_idx = 0;
+        for (int i = 0; i < vio.imu_count; ++i) {
+            if (vio.imu_buffer[i].timestamp >= oldest_clone_time - 0.5) {
+                vio.imu_buffer[write_idx++] = vio.imu_buffer[i];
+            }
+        }
+        vio.imu_count = write_idx;
+    }
+}
+
+bool try_to_initialize(VioManagerData& vio) {
+    Eigen::Matrix<double, 15, 15> init_cov;
+    double init_ts = 0.0;
+    
+    // wait_for_jerk=true matches official OpenVINS's InertialInitializer
+    // default (initialize(..., wait_for_jerk=true)): initialize on the
+    // takeoff "jerk" (still-then-moving) rather than during the initial
+    // stationary window. DOD previously passed false (init when stationary),
+    // a real divergence from official's init trigger.
+    bool success = initialize::static_initialize(vio.params.init_opt, vio.imu_buffer, vio.imu_count,
+                                                              vio.state.imu, init_cov, init_ts, vio.params.init_wait_for_jerk);
+    // Dynamic (linear MLE) fallback: for sequences with no clean stationary
+    // start (e.g. EuRoC MH_*), static init never fires. Matches official
+    // OpenVINS's InertialInitializer, which falls back to the dynamic
+    // initializer when the static one cannot find a stationary window.
+    if (!success && vio.params.init_opt.init_dyn_use) {
+        success = initialize::dynamic_initialize(vio.params.init_opt, vio.db, vio.imu_buffer, vio.imu_count,
+                                                 vio.params.camera_extrinsics, vio.params.num_cameras,
+                                                 vio.state.imu, init_cov, init_ts);
+    }
+    if (success) {
+        vio.state.timestamp = init_ts;
+        
+        type::Variable* order[1] = { &vio.state.imu };
+        vio.state.Cov.setZero();
+        set_initial_covariance(vio.state, init_cov, order, 1);
+        
+        vio.is_initialized = true;
+        vio.initialized_time = init_ts;
+
+        // Clean up database for measurements before initialization
+        core::cleanup_db_measurements(vio.db, init_ts);
+        return true;
+    }
+    return false;
+}
+
+} // namespace msckf
