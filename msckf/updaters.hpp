@@ -8,6 +8,11 @@
 
 namespace msckf {
 
+// Anchor-change accounting, defined in updaters.cpp. Each failure path kills a
+// SLAM landmark, so they are counted rather than silent.
+extern long anchor_marg_no_old, anchor_marg_depth, anchor_marg_transform, anchor_change_ok;
+extern long dinit_seen, dinit_skip_cap, dinit_skip_meas, dinit_skip_tri, dinit_ok;
+
 struct UpdaterOptions {
     double sigma_pix = 1.0;
     double sigma_pix_sq = 1.0;
@@ -65,9 +70,9 @@ void get_feature_jacobian_full(const State& state, const core::Feature& feature,
                                Eigen::MatrixXd& H_f, Eigen::MatrixXd& H_x, Eigen::VectorXd& res,
                                type::Variable** Hx_order, int& num_Hx);
 
-void nullspace_project_inplace(const Eigen::MatrixXd& H_f, Eigen::MatrixXd& H_x, Eigen::VectorXd& res);
+// H_f is modified in place (Givens applied to it as well), matching official.
+void nullspace_project_inplace(Eigen::MatrixXd& H_f, Eigen::MatrixXd& H_x, Eigen::VectorXd& res);
 
-void measurement_compress_inplace(const Eigen::MatrixXd& H_x, const Eigen::VectorXd& res,
-                                  Eigen::MatrixXd& H_x_comp, Eigen::VectorXd& res_comp);
+void measurement_compress_inplace(Eigen::MatrixXd& H_x, Eigen::VectorXd& res);
 
 } // namespace msckf

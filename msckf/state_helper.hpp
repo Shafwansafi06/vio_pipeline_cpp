@@ -5,6 +5,11 @@
 
 namespace msckf {
 
+// Count of negative covariance diagonals seen in EKFUpdate (official exits on
+// the first one). Non-zero means the filter is running in a state official
+// would call corrupt.
+extern long ekf_negative_diagonal_count;
+
 void EKFPropagation(State& state, type::Variable** order_NEW, int num_NEW,
                                type::Variable** order_OLD, int num_OLD,
                                const Eigen::Ref<const Eigen::MatrixXd>& Phi,

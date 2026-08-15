@@ -69,7 +69,7 @@ int main() {
     // 2. Instantiate pipeline manager
     ArenaAllocator global_arena(MiB(16));
     msckf::VioManagerData* vio = global_arena.allocate<msckf::VioManagerData>();
-    assert(vio != nullptr);
+    if (vio == nullptr) { std::cout << "[FAIL]: arena allocation failed\n"; return 1; }
     msckf::init_vio_manager(*vio, params);
     
     // Chronologically feed sensor data
@@ -130,12 +130,14 @@ int main() {
             Eigen::Vector3d bg = Eigen::Map<const Eigen::Vector3d>(state.imu.value + 10);
             Eigen::Vector3d ba = Eigen::Map<const Eigen::Vector3d>(state.imu.value + 13);
             
-            assert(check_close_quat(q, tests::EXPECTED_INIT_Q));
-            assert(check_close(p, tests::EXPECTED_INIT_P));
-            assert(check_close(v, tests::EXPECTED_INIT_V));
-            assert(check_close(bg, tests::EXPECTED_INIT_BG));
-            assert(check_close(ba, tests::EXPECTED_INIT_BA));
-            
+            // NOTE: explicit returns, not assert() -- Release defines NDEBUG, which
+            // compiles assert() out and made this test unable to fail.
+            if (!check_close_quat(q, tests::EXPECTED_INIT_Q)) return 1;
+            if (!check_close(p, tests::EXPECTED_INIT_P)) return 1;
+            if (!check_close(v, tests::EXPECTED_INIT_V)) return 1;
+            if (!check_close(bg, tests::EXPECTED_INIT_BG)) return 1;
+            if (!check_close(ba, tests::EXPECTED_INIT_BA)) return 1;
+
             std::cout << "[SUCCESS]: Initialization EKF state matches Python exactly.\n";
             init_verified = true;
         }
@@ -151,12 +153,25 @@ int main() {
     Eigen::Vector3d bg = Eigen::Map<const Eigen::Vector3d>(state.imu.value + 10);
     Eigen::Vector3d ba = Eigen::Map<const Eigen::Vector3d>(state.imu.value + 13);
     
-    assert(check_close_quat(q, tests::EXPECTED_PROP_Q));
-    assert(check_close(p, tests::EXPECTED_PROP_P));
-    assert(check_close(v, tests::EXPECTED_PROP_V));
-    assert(check_close(bg, tests::EXPECTED_PROP_BG));
-    assert(check_close(ba, tests::EXPECTED_PROP_BA));
-    
+    // The pipeline does not initialize on these synthetic vectors -- verified to
+    // be true of the pre-parity baseline too, so it is a pre-existing gap, not a
+    // regression. It went unnoticed because every check here used assert(), and
+    // Release defines NDEBUG. Left non-fatal on purpose: this test's reference
+    // data comes from the Python port, which the parity manual documents as
+    // unvalidated, so it is the wrong place to litigate initializer behaviour.
+    // The initializers get a real oracle in the parity suite (stage 2.13).
+    if (!init_verified) {
+        std::cout << "[WARN]: pipeline never initialized on these vectors; "
+                     "the initialization comparison below was NOT exercised.\n";
+    }
+    std::cout << "state q=" << q.transpose() << " p=" << p.transpose() << " v=" << v.transpose() << "\n";
+
+    if (!check_close_quat(q, tests::EXPECTED_PROP_Q)) return 1;
+    if (!check_close(p, tests::EXPECTED_PROP_P)) return 1;
+    if (!check_close(v, tests::EXPECTED_PROP_V)) return 1;
+    if (!check_close(bg, tests::EXPECTED_PROP_BG)) return 1;
+    if (!check_close(ba, tests::EXPECTED_PROP_BA)) return 1;
+
     std::cout << "[SUCCESS]: EKF state propagation matches Python exactly.\n";
     
     std::cout << "All mathematical equivalence tests passed successfully!\n";

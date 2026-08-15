@@ -68,29 +68,27 @@ int select_imu_readings(const core::ImuData* imu_data, int imu_count,
     }
     
     if (count == 0) return 0;
-    
-    if (std::abs(selected_out[count - 1].timestamp - time1) > 1e-12) {
+
+    // Official compares the trailing timestamp to time1 with an exact !=, not a
+    // tolerance. A 1e-12 window here suppressed the final interpolated sample on
+    // windows whose end lands within a picosecond of a reading.
+    if (selected_out[count - 1].timestamp != time1) {
         if (count < max_out_capacity) {
             selected_out[count++] = interpolate_data(imu_data[imu_count - 2], imu_data[imu_count - 1], time1);
         }
     }
-    
-    int filtered_count = 0;
-    core::ImuData filtered[2000];
-    filtered[filtered_count++] = selected_out[0];
-    for (int i = 1; i < count; ++i) {
-        if (std::abs(selected_out[i].timestamp - selected_out[i-1].timestamp) > 1e-12) {
-            if (filtered_count < 2000) {
-                filtered[filtered_count++] = selected_out[i];
-            }
+
+    // Zero-dt removal. Official erases the EARLIER reading of the pair and
+    // re-examines the same index; keeping the earlier one instead (as this did)
+    // hands the propagator a different wm/am at that step.
+    for (int i = 0; i + 1 < count; ++i) {
+        if (std::abs(selected_out[i + 1].timestamp - selected_out[i].timestamp) < 1e-12) {
+            for (int j = i; j + 1 < count; ++j) selected_out[j] = selected_out[j + 1];
+            --count;
+            --i;
         }
     }
-    
-    int num_to_copy = std::min(filtered_count, max_out_capacity);
-    for (int i = 0; i < num_to_copy; ++i) {
-        selected_out[i] = filtered[i];
-    }
-    return num_to_copy;
+    return count;
 }
 
 void init_propagator(PropagatorData& prop, const PropagatorNoises& noises, double gravity_mag) {
@@ -334,77 +332,73 @@ void predict_and_compute(const PropagatorData& prop, const State& state, const c
 
 void compute_Xi_sum(const State& state, double dt, const Eigen::Vector3d& w_hat, const Eigen::Vector3d& a_hat,
                                 Eigen::Matrix<double, 3, 18>& Xi_sum) {
+    // Transcribed from official Propagator::compute_Xi_sum term-for-term.
+    // Three things here are NOT free to tidy up, each verified by bitdiff_prop:
+    //   - std::pow(dt, 3) is not bit-equal to dt*dt*dt, likewise w_norm3/d_th3.
+    //   - `1.0/6 * d_th3` is not bit-equal to `d_th3 / 6.0` (1/6 is inexact).
+    //   - `coef * sA * sK` groups as `(coef * sA) * sK` -- scaling the matrix
+    //     first, then multiplying. Writing `coef * (sA * sK)` reassociates and
+    //     changes the last bits.
     double w_norm = w_hat.norm();
     double d_th = w_norm * dt;
-    
     Eigen::Vector3d k_hat = Eigen::Vector3d::Zero();
     if (w_norm > 1e-12) {
         k_hat = w_hat / w_norm;
     }
-    
-    Eigen::Matrix3d I3 = Eigen::Matrix3d::Identity();
-    double d_t2 = dt * dt;
-    double d_t3 = dt * dt * dt;
-    double w_norm2 = w_norm * w_norm;
-    double w_norm3 = w_norm * w_norm * w_norm;
+
+    Eigen::Matrix3d I_3x3 = Eigen::Matrix3d::Identity();
+    double d_t2 = std::pow(dt, 2);
+    double d_t3 = std::pow(dt, 3);
+    double w_norm2 = std::pow(w_norm, 2);
+    double w_norm3 = std::pow(w_norm, 3);
     double cos_dth = std::cos(d_th);
     double sin_dth = std::sin(d_th);
-    double d_th2 = d_th * d_th;
-    double d_th3 = d_th * d_th * d_th;
-    
+    double d_th2 = std::pow(d_th, 2);
+    double d_th3 = std::pow(d_th, 3);
     Eigen::Matrix3d sK = type::skew_x(k_hat);
     Eigen::Matrix3d sK2 = sK * sK;
     Eigen::Matrix3d sA = type::skew_x(a_hat);
-    
-    Eigen::Matrix3d R_ktok1 = type::exp_so3(-w_hat * dt);
-    Eigen::Matrix3d Jr_ktok1 = type::Jr_so3(-w_hat * dt);
-    
-    Eigen::Matrix3d Xi_1 = Eigen::Matrix3d::Zero();
-    Eigen::Matrix3d Xi_2 = Eigen::Matrix3d::Zero();
-    Eigen::Matrix3d Xi_3 = Eigen::Matrix3d::Zero();
-    Eigen::Matrix3d Xi_4 = Eigen::Matrix3d::Zero();
-    
-    bool small_w = (w_norm < (1.0 / 180.0 * M_PI / 2.0));
-    
+
+    Eigen::Matrix3d R_ktok1, Xi_1, Xi_2, Jr_ktok1, Xi_3, Xi_4;
+    R_ktok1 = type::exp_so3(-w_hat * dt);
+    Jr_ktok1 = type::Jr_so3(-w_hat * dt);
+
+    bool small_w = (w_norm < 1.0 / 180 * M_PI / 2);
     if (!small_w) {
-        Xi_1 = I3 * dt + (1.0 - cos_dth) / w_norm * sK + (dt - sin_dth / w_norm) * sK2;
-        Xi_2 = 0.5 * d_t2 * I3 + (d_th - sin_dth) / w_norm2 * sK + (0.5 * d_t2 - (1.0 - cos_dth) / w_norm2) * sK2;
-        
-        Eigen::Matrix3d term1 = (sin_dth - d_th) / w_norm2 * (sA * sK);
-        Eigen::Matrix3d term2 = (sin_dth - d_th * cos_dth) / w_norm2 * (sK * sA);
-        Eigen::Matrix3d term3 = (0.5 * d_t2 - (1.0 - cos_dth) / w_norm2) * (sA * sK2);
-        
-        Eigen::Matrix3d cross_term_1 = (sK2 * sA) + k_hat.dot(a_hat) * sK;
-        double coeff_1 = (0.5 * d_t2 + (1.0 - cos_dth - d_th * sin_dth) / w_norm2);
-        Eigen::Matrix3d cross_term_2 = k_hat.dot(a_hat) * sK2;
-        double coeff_2 = (3.0 * sin_dth - 2.0 * d_th - d_th * cos_dth) / w_norm2;
-        
-        Xi_3 = 0.5 * d_t2 * sA + term1 + term2 + term3 + coeff_1 * cross_term_1 - coeff_2 * cross_term_2;
-        
-        Eigen::Matrix3d xi4_term1 = (2.0 * (1.0 - cos_dth) - d_th2) / (2.0 * w_norm3) * (sA * sK);
-        Eigen::Matrix3d xi4_term2 = ((2.0 * (1.0 - cos_dth) - d_th * sin_dth) / w_norm3) * (sK * sA);
-        Eigen::Matrix3d xi4_term3 = ((sin_dth - d_th) / w_norm3 + d_t3 / 6.0) * (sA * sK2);
-        double xi4_coeff4 = (d_th - 2.0 * sin_dth + d_th3 / 6.0 + d_th * cos_dth) / w_norm3;
-        Eigen::Matrix3d xi4_term4 = xi4_coeff4 * (sK2 * sA);
-        Eigen::Matrix3d xi4_term5 = xi4_coeff4 * (k_hat.dot(a_hat) * sK);
-        double xi4_coeff6 = (4.0 * cos_dth - 4.0 + d_th2 + d_th * sin_dth) / w_norm3;
-        Eigen::Matrix3d xi4_term6 = xi4_coeff6 * (k_hat.dot(a_hat) * sK2);
-        
-        Xi_4 = (1.0 / 6.0) * d_t3 * sA + xi4_term1 + xi4_term2 + xi4_term3 + xi4_term4 + xi4_term5 + xi4_term6;
+
+        Xi_1 = I_3x3 * dt + (1.0 - cos_dth) / w_norm * sK + (dt - sin_dth / w_norm) * sK2;
+
+        Xi_2 = 1.0 / 2 * d_t2 * I_3x3 + (d_th - sin_dth) / w_norm2 * sK + (1.0 / 2 * d_t2 - (1.0 - cos_dth) / w_norm2) * sK2;
+
+        Xi_3 = 1.0 / 2 * d_t2 * sA + (sin_dth - d_th) / w_norm2 * sA * sK + (sin_dth - d_th * cos_dth) / w_norm2 * sK * sA +
+               (1.0 / 2 * d_t2 - (1.0 - cos_dth) / w_norm2) * sA * sK2 +
+               (1.0 / 2 * d_t2 + (1.0 - cos_dth - d_th * sin_dth) / w_norm2) * (sK2 * sA + k_hat.dot(a_hat) * sK) -
+               (3 * sin_dth - 2 * d_th - d_th * cos_dth) / w_norm2 * k_hat.dot(a_hat) * sK2;
+
+        Xi_4 = 1.0 / 6 * d_t3 * sA + (2 * (1.0 - cos_dth) - d_th2) / (2 * w_norm3) * sA * sK +
+               ((2 * (1.0 - cos_dth) - d_th * sin_dth) / w_norm3) * sK * sA + ((sin_dth - d_th) / w_norm3 + d_t3 / 6) * sA * sK2 +
+               ((d_th - 2 * sin_dth + 1.0 / 6 * d_th3 + d_th * cos_dth) / w_norm3) * (sK2 * sA + k_hat.dot(a_hat) * sK) +
+               (4 * cos_dth - 4 + d_th2 + d_th * sin_dth) / w_norm3 * k_hat.dot(a_hat) * sK2;
+
     } else {
-        Xi_1 = dt * (I3 + sin_dth * sK + (1.0 - cos_dth) * sK2);
-        Xi_2 = 0.5 * dt * Xi_1;
-        Eigen::Matrix3d term_small = sA + sin_dth * (-sA * sK + sK * sA + k_hat.dot(a_hat) * sK2) + (1.0 - cos_dth) * (sA * sK2 + sK2 * sA + k_hat.dot(a_hat) * sK);
-        Xi_3 = 0.5 * d_t2 * term_small;
-        Xi_4 = (1.0 / 3.0) * dt * Xi_3;
+
+        Xi_1 = dt * (I_3x3 + sin_dth * sK + (1.0 - cos_dth) * sK2);
+
+        Xi_2 = 1.0 / 2 * dt * Xi_1;
+
+        Xi_3 = 1.0 / 2 * d_t2 *
+               (sA + sin_dth * (-sA * sK + sK * sA + k_hat.dot(a_hat) * sK2) + (1.0 - cos_dth) * (sA * sK2 + sK2 * sA + k_hat.dot(a_hat) * sK));
+
+        Xi_4 = 1.0 / 3 * dt * Xi_3;
     }
-    
-    Xi_sum.block<3, 3>(0, 0) = R_ktok1;
-    Xi_sum.block<3, 3>(0, 3) = Xi_1;
-    Xi_sum.block<3, 3>(0, 6) = Xi_2;
-    Xi_sum.block<3, 3>(0, 9) = Jr_ktok1;
-    Xi_sum.block<3, 3>(0, 12) = Xi_3;
-    Xi_sum.block<3, 3>(0, 15) = Xi_4;
+
+    Xi_sum.setZero();
+    Xi_sum.block(0, 0, 3, 3) = R_ktok1;
+    Xi_sum.block(0, 3, 3, 3) = Xi_1;
+    Xi_sum.block(0, 6, 3, 3) = Xi_2;
+    Xi_sum.block(0, 9, 3, 3) = Jr_ktok1;
+    Xi_sum.block(0, 12, 3, 3) = Xi_3;
+    Xi_sum.block(0, 15, 3, 3) = Xi_4;
 }
 
 void predict_mean_discrete(const PropagatorData& prop, const State& state, double dt, const Eigen::Vector3d& w_hat, const Eigen::Vector3d& a_hat,
@@ -434,49 +428,73 @@ void predict_mean_rk4(const PropagatorData& prop, const State& state, double dt,
                                   const Eigen::Vector3d& w_hat1, const Eigen::Vector3d& a_hat1,
                                   const Eigen::Vector3d& w_hat2, const Eigen::Vector3d& a_hat2,
                                   Eigen::Vector4d& new_q, Eigen::Vector3d& new_v, Eigen::Vector3d& new_p) {
+    // Transcribed from official Propagator::predict_mean_rk4. Two details that
+    // look redundant and are not (both caught by bitdiff_prop):
+    //   - The k4 stage uses w_hat/a_hat reached by two accumulated
+    //     `+= 0.5 * w_alpha * dt` steps, NOT w_hat2 directly. The two are equal
+    //     in exact arithmetic and differ in the last bits.
+    //   - Renormalisation goes through quatnorm(), which flips the sign when
+    //     q(3) < 0. Eigen's .normalized() does not, so it can return the
+    //     antipodal quaternion.
+    Eigen::Vector3d w_hat = w_hat1;
+    Eigen::Vector3d a_hat = a_hat1;
     Eigen::Vector3d w_alpha = (w_hat2 - w_hat1) / dt;
     Eigen::Vector3d a_jerk = (a_hat2 - a_hat1) / dt;
-    
+
     Eigen::Vector4d q_0(state.imu.value[0], state.imu.value[1], state.imu.value[2], state.imu.value[3]);
     Eigen::Vector3d p_0(state.imu.value[4], state.imu.value[5], state.imu.value[6]);
     Eigen::Vector3d v_0(state.imu.value[7], state.imu.value[8], state.imu.value[9]);
-    
+
+    // k1 ---------------------------------------------------------------------
     Eigen::Vector4d dq_0(0.0, 0.0, 0.0, 1.0);
-    
-    auto compute_deriv = [&](const Eigen::Vector4d& q, const Eigen::Vector3d& v, const Eigen::Vector3d& w, const Eigen::Vector3d& a,
-                             Eigen::Vector4d& q_dot, Eigen::Vector3d& p_dot, Eigen::Vector3d& v_dot) {
-        q_dot = 0.5 * type::Omega(w) * q;
-        p_dot = v;
-        Eigen::Matrix3d R = type::quat_2_Rot(type::quat_multiply(q, q_0));
-        v_dot = R.transpose() * a - prop.gravity;
-    };
-    
-    Eigen::Vector4d k1_q_dot; Eigen::Vector3d k1_p_dot, k1_v_dot;
-    compute_deriv(dq_0, v_0, w_hat1, a_hat1, k1_q_dot, k1_p_dot, k1_v_dot);
-    Eigen::Vector4d k1_q = k1_q_dot * dt; Eigen::Vector3d k1_p = k1_p_dot * dt, k1_v = k1_v_dot * dt;
-    
-    Eigen::Vector3d w_mid = w_hat1 + 0.5 * w_alpha * dt;
-    Eigen::Vector3d a_mid = a_hat1 + 0.5 * a_jerk * dt;
-    
-    Eigen::Vector4d dq_1 = (dq_0 + 0.5 * k1_q).normalized();
+    Eigen::Vector4d q0_dot = 0.5 * type::Omega(w_hat) * dq_0;
+    Eigen::Vector3d p0_dot = v_0;
+    Eigen::Matrix3d R_Gto0 = type::quat_2_Rot(type::quat_multiply(dq_0, q_0));
+    Eigen::Vector3d v0_dot = R_Gto0.transpose() * a_hat - prop.gravity;
+    Eigen::Vector4d k1_q = q0_dot * dt;
+    Eigen::Vector3d k1_p = p0_dot * dt;
+    Eigen::Vector3d k1_v = v0_dot * dt;
+
+    w_hat += 0.5 * w_alpha * dt;
+    a_hat += 0.5 * a_jerk * dt;
+
+    // k2 ---------------------------------------------------------------------
+    Eigen::Vector4d dq_1 = type::quatnorm(dq_0 + 0.5 * k1_q);
     Eigen::Vector3d v_1 = v_0 + 0.5 * k1_v;
-    Eigen::Vector4d k2_q_dot; Eigen::Vector3d k2_p_dot, k2_v_dot;
-    compute_deriv(dq_1, v_1, w_mid, a_mid, k2_q_dot, k2_p_dot, k2_v_dot);
-    Eigen::Vector4d k2_q = k2_q_dot * dt; Eigen::Vector3d k2_p = k2_p_dot * dt, k2_v = k2_v_dot * dt;
-    
-    Eigen::Vector4d dq_2 = (dq_0 + 0.5 * k2_q).normalized();
+    Eigen::Vector4d q1_dot = 0.5 * type::Omega(w_hat) * dq_1;
+    Eigen::Vector3d p1_dot = v_1;
+    Eigen::Matrix3d R_Gto1 = type::quat_2_Rot(type::quat_multiply(dq_1, q_0));
+    Eigen::Vector3d v1_dot = R_Gto1.transpose() * a_hat - prop.gravity;
+    Eigen::Vector4d k2_q = q1_dot * dt;
+    Eigen::Vector3d k2_p = p1_dot * dt;
+    Eigen::Vector3d k2_v = v1_dot * dt;
+
+    // k3 ---------------------------------------------------------------------
+    Eigen::Vector4d dq_2 = type::quatnorm(dq_0 + 0.5 * k2_q);
     Eigen::Vector3d v_2 = v_0 + 0.5 * k2_v;
-    Eigen::Vector4d k3_q_dot; Eigen::Vector3d k3_p_dot, k3_v_dot;
-    compute_deriv(dq_2, v_2, w_mid, a_mid, k3_q_dot, k3_p_dot, k3_v_dot);
-    Eigen::Vector4d k3_q = k3_q_dot * dt; Eigen::Vector3d k3_p = k3_p_dot * dt, k3_v = k3_v_dot * dt;
-    
-    Eigen::Vector4d dq_3 = (dq_0 + k3_q).normalized();
+    Eigen::Vector4d q2_dot = 0.5 * type::Omega(w_hat) * dq_2;
+    Eigen::Vector3d p2_dot = v_2;
+    Eigen::Matrix3d R_Gto2 = type::quat_2_Rot(type::quat_multiply(dq_2, q_0));
+    Eigen::Vector3d v2_dot = R_Gto2.transpose() * a_hat - prop.gravity;
+    Eigen::Vector4d k3_q = q2_dot * dt;
+    Eigen::Vector3d k3_p = p2_dot * dt;
+    Eigen::Vector3d k3_v = v2_dot * dt;
+
+    w_hat += 0.5 * w_alpha * dt;
+    a_hat += 0.5 * a_jerk * dt;
+
+    // k4 ---------------------------------------------------------------------
+    Eigen::Vector4d dq_3 = type::quatnorm(dq_0 + k3_q);
     Eigen::Vector3d v_3 = v_0 + k3_v;
-    Eigen::Vector4d k4_q_dot; Eigen::Vector3d k4_p_dot, k4_v_dot;
-    compute_deriv(dq_3, v_3, w_hat2, a_hat2, k4_q_dot, k4_p_dot, k4_v_dot);
-    Eigen::Vector4d k4_q = k4_q_dot * dt; Eigen::Vector3d k4_p = k4_p_dot * dt, k4_v = k4_v_dot * dt;
-    
-    Eigen::Vector4d dq = (dq_0 + (1.0 / 6.0) * k1_q + (1.0 / 3.0) * k2_q + (1.0 / 3.0) * k3_q + (1.0 / 6.0) * k4_q).normalized();
+    Eigen::Vector4d q3_dot = 0.5 * type::Omega(w_hat) * dq_3;
+    Eigen::Vector3d p3_dot = v_3;
+    Eigen::Matrix3d R_Gto3 = type::quat_2_Rot(type::quat_multiply(dq_3, q_0));
+    Eigen::Vector3d v3_dot = R_Gto3.transpose() * a_hat - prop.gravity;
+    Eigen::Vector4d k4_q = q3_dot * dt;
+    Eigen::Vector3d k4_p = p3_dot * dt;
+    Eigen::Vector3d k4_v = v3_dot * dt;
+
+    Eigen::Vector4d dq = type::quatnorm(dq_0 + (1.0 / 6.0) * k1_q + (1.0 / 3.0) * k2_q + (1.0 / 3.0) * k3_q + (1.0 / 6.0) * k4_q);
     new_q = type::quat_multiply(dq, q_0);
     new_p = p_0 + (1.0 / 6.0) * k1_p + (1.0 / 3.0) * k2_p + (1.0 / 3.0) * k3_p + (1.0 / 6.0) * k4_p;
     new_v = v_0 + (1.0 / 6.0) * k1_v + (1.0 / 3.0) * k2_v + (1.0 / 3.0) * k3_v + (1.0 / 6.0) * k4_v;

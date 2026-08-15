@@ -7,6 +7,31 @@
 
 namespace core {
 
+// Triangulation rejection counters (see single_triangulation). Reported by the
+// runners; zero-cost to leave in, and the alternative is guessing.
+long tri_reject_cond = 0;
+long tri_reject_mindist = 0;
+long tri_reject_maxdist = 0;
+long tri_reject_nan = 0;
+long tri_accept = 0;
+long db_full_refusals = 0;
+long tri_reject_cond_meas = 0;
+long tri_accept_meas = 0;
+long tri_cond_hist[32] = {0};
+long tri_accept_hist[32] = {0};
+long gn_reject_dist = 0;
+long gn_reject_baseline = 0;
+long gn_accept = 0;
+
+// Official iterates features' per-camera measurement lists through an
+// unordered_map<size_t, ...> keyed by camera id. With ids inserted 0 then 1,
+// libstdc++ walks them in reverse: camera 1 first. Every accumulation order and
+// the anchor tie-break inherit that, so DOD has to walk them the same way.
+// These names exist so the intent survives; do not "fix" them to ascending.
+static constexpr int OV_CAM_FIRST = 1;
+static constexpr int OV_CAM_END = -1;
+static constexpr int OV_CAM_STEP = -1;
+
 const ClonePose* find_clone_pose(const ClonesCamera& clones, int cam_id, double ts) {
     for (int i = 0; i < clones.num_clones; ++i) {
         if (clones.timestamps[i] == ts) {
@@ -60,6 +85,11 @@ void update_feature(FeatureDatabase& db, int feat_id, double timestamp, int cam_
     }
     
     if (db.count >= 2048) {
+        // Silently refusing new features once full is not the same as
+        // official, whose database is an unbounded map pruned by age. If this
+        // fires the tracker is effectively capped and tracks cannot be
+        // replaced, so it must be visible rather than silent.
+        ++db_full_refusals;
         return;
     }
     
@@ -185,9 +215,18 @@ void clear_older_measurements(Feature& feat, double timestamp) {
 }
 
 bool single_triangulation(Feature& feat, const ClonesCamera& clones, const FeatureInitializerOptions& options) {
+    // Anchor selection must follow official's, INCLUDING its tie-break.
+    //
+    // Official loops `for (auto const &pair : feat->timestamps)` -- an
+    // unordered_map keyed by camera id -- and takes a new anchor only on a
+    // strict `>`. With cam ids inserted 0 then 1, libstdc++ iterates them 1
+    // then 0, so on an equal-count tie official keeps camera 1, not camera 0.
+    // Picking 0 here (as this did) anchors stereo features to the other camera
+    // and changes p_FinA, the residuals, and the Jacobians for every one of
+    // them. Verified against the oracle by bitdiff_tri's [6,6] and [3,3] cases.
     int count_cam[2] = {0, 0};
     double latest_ts[2] = {-1.0, -1.0};
-    
+
     for (int m = 0; m < feat.num_measurements; ++m) {
         int cid = feat.measurements[m].cam_id;
         count_cam[cid]++;
@@ -195,16 +234,16 @@ bool single_triangulation(Feature& feat, const ClonesCamera& clones, const Featu
             latest_ts[cid] = feat.measurements[m].timestamp;
         }
     }
-    
-    int anchor_cam = -1;
-    if (count_cam[0] > count_cam[1]) {
-        anchor_cam = 0;
-    } else if (count_cam[1] > count_cam[0]) {
-        anchor_cam = 1;
-    } else {
-        anchor_cam = 0; // fallback to 0
+
+    int anchor_cam = 0;
+    int most_meas = 0;
+    for (int cid = OV_CAM_FIRST; cid != OV_CAM_END; cid += OV_CAM_STEP) {
+        if (count_cam[cid] > most_meas) {
+            anchor_cam = cid;
+            most_meas = count_cam[cid];
+        }
     }
-    
+
     if (count_cam[anchor_cam] == 0) {
         return false;
     }
@@ -221,8 +260,11 @@ bool single_triangulation(Feature& feat, const ClonesCamera& clones, const Featu
     Eigen::Matrix3d A = Eigen::Matrix3d::Zero();
     Eigen::Vector3d b = Eigen::Vector3d::Zero();
     
+    // Summation order follows official's unordered_map iteration (camera 1 then
+    // camera 0); a different order sums the same terms to different last bits.
+    for (int cid = OV_CAM_FIRST; cid != OV_CAM_END; cid += OV_CAM_STEP)
     for (int m = 0; m < feat.num_measurements; ++m) {
-        int cid = feat.measurements[m].cam_id;
+        if (feat.measurements[m].cam_id != cid) continue;
         double ts = feat.measurements[m].timestamp;
         
         const ClonePose* curr_pose = find_clone_pose(clones, cid, ts);
@@ -244,23 +286,31 @@ bool single_triangulation(Feature& feat, const ClonesCamera& clones, const Featu
         b += Ai * p_CiinA;
     }
     
-    Eigen::ColPivHouseholderQR<Eigen::Matrix3d> dec(A);
-    if (std::abs(dec.determinant()) < 1e-12) {
-        return false;
-    }
-    
-    Eigen::Vector3d p_f = dec.solve(b);
+    // NOTE: official applies no determinant test here -- it relies solely on the
+    // condition-number / depth checks below. The |det(A)| < 1e-12 early return
+    // that used to sit here was an invention, and it rejected features official
+    // accepts, depressing the MSCKF accept rate.
+    Eigen::Vector3d p_f = A.colPivHouseholderQr().solve(b);
     
     Eigen::JacobiSVD<Eigen::Matrix3d> svd(A);
     Eigen::Vector3d S = svd.singularValues();
     double condA = (S[2] == 0.0) ? 1e9 : (S[0] / S[2]);
-    
-    if (std::abs(condA) > options.max_cond_number ||
-        p_f[2] < options.min_dist ||
-        p_f[2] > options.max_dist ||
-        std::isnan(p_f.norm())) {
+
+    // Per-criterion rejection accounting. 47% of features were being rejected
+    // here and "triangulation" is four different tests; knowing which one fires
+    // is the difference between tuning a threshold and rewriting a frontend.
+    if (std::abs(condA) > options.max_cond_number) {
+        ++tri_reject_cond;
+        tri_reject_cond_meas += feat.num_measurements;
+        if (feat.num_measurements < 32) ++tri_cond_hist[feat.num_measurements];
         return false;
     }
+    if (p_f[2] < options.min_dist) { ++tri_reject_mindist; return false; }
+    if (p_f[2] > options.max_dist) { ++tri_reject_maxdist; return false; }
+    if (std::isnan(p_f.norm())) { ++tri_reject_nan; return false; }
+    ++tri_accept;
+    tri_accept_meas += feat.num_measurements;
+    if (feat.num_measurements < 32) ++tri_accept_hist[feat.num_measurements];
     
     feat.p_FinA = p_f;
     feat.p_FinG = R_GtoA.transpose() * p_f + p_AinG;
@@ -360,50 +410,63 @@ bool single_triangulation_1d(Feature& feat, const ClonesCamera& clones, const Fe
 }
 
 double compute_error(const ClonesCamera& clones, const Feature& feat, double alpha, double beta, double rho) {
-    double err = 0.0;
-    
+    // Two parity details, both verified by bitdiff_tri:
+    //   - Official forms the predicted measurement and the residual in FLOAT32
+    //     (Eigen::Matrix<float,2,1>), because uvs_norm is stored as VectorXf.
+    //     Doing this in double gives a different cost, which steers the
+    //     Gauss-Newton refinement down a different path.
+    //   - Official accumulates pow(res.norm(), 2) -- a square root followed by
+    //     a square -- not res.squaredNorm(). They differ in the last bits.
+    double err = 0;
+
     const ClonePose* anchor_pose = find_clone_pose(clones, feat.anchor_cam_id, feat.anchor_clone_timestamp);
     if (!anchor_pose) return 1e9;
-    
-    Eigen::Matrix3d R_GtoA = anchor_pose->R;
-    Eigen::Vector3d p_AinG = anchor_pose->p;
-    
+
+    const Eigen::Matrix3d& R_GtoA = anchor_pose->R;
+    const Eigen::Vector3d& p_AinG = anchor_pose->p;
+
+    for (int cid = OV_CAM_FIRST; cid != OV_CAM_END; cid += OV_CAM_STEP)
     for (int m = 0; m < feat.num_measurements; ++m) {
-        int cid = feat.measurements[m].cam_id;
-        double ts = feat.measurements[m].timestamp;
-        
+        if (feat.measurements[m].cam_id != cid) continue;
+        const double ts = feat.measurements[m].timestamp;
+
         const ClonePose* curr_pose = find_clone_pose(clones, cid, ts);
         if (!curr_pose) continue;
-        
-        Eigen::Matrix3d R_GtoCi = curr_pose->R;
-        Eigen::Vector3d p_CiinG = curr_pose->p;
-        
-        Eigen::Matrix3d R_AtoCi = R_GtoCi * R_GtoA.transpose();
-        Eigen::Vector3d p_CiinA = R_GtoA * (p_CiinG - p_AinG);
-        Eigen::Vector3d p_AinCi = -R_AtoCi * p_CiinA;
-        
-        double hi1 = R_AtoCi(0, 0)*alpha + R_AtoCi(0, 1)*beta + R_AtoCi(0, 2) + rho*p_AinCi[0];
-        double hi2 = R_AtoCi(1, 0)*alpha + R_AtoCi(1, 1)*beta + R_AtoCi(1, 2) + rho*p_AinCi[1];
-        double hi3 = R_AtoCi(2, 0)*alpha + R_AtoCi(2, 1)*beta + R_AtoCi(2, 2) + rho*p_AinCi[2];
-        
-        if (hi3 == 0.0) {
-            err += 1e9;
-            continue;
-        }
-        
-        Eigen::Vector2d z_pred(hi1 / hi3, hi2 / hi3);
-        Eigen::Vector2d res = feat.measurements[m].uv_norm - z_pred;
-        err += res.squaredNorm();
+
+        const Eigen::Matrix3d& R_GtoCi = curr_pose->R;
+        const Eigen::Vector3d& p_CiinG = curr_pose->p;
+
+        Eigen::Matrix<double, 3, 3> R_AtoCi;
+        R_AtoCi.noalias() = R_GtoCi * R_GtoA.transpose();
+        Eigen::Matrix<double, 3, 1> p_CiinA;
+        p_CiinA.noalias() = R_GtoA * (p_CiinG - p_AinG);
+        Eigen::Matrix<double, 3, 1> p_AinCi;
+        p_AinCi.noalias() = -R_AtoCi * p_CiinA;
+
+        double hi1 = R_AtoCi(0, 0) * alpha + R_AtoCi(0, 1) * beta + R_AtoCi(0, 2) + rho * p_AinCi(0, 0);
+        double hi2 = R_AtoCi(1, 0) * alpha + R_AtoCi(1, 1) * beta + R_AtoCi(1, 2) + rho * p_AinCi(1, 0);
+        double hi3 = R_AtoCi(2, 0) * alpha + R_AtoCi(2, 1) * beta + R_AtoCi(2, 2) + rho * p_AinCi(2, 0);
+
+        Eigen::Matrix<float, 2, 1> z;
+        z << hi1 / hi3, hi2 / hi3;
+        Eigen::Matrix<float, 2, 1> uv_norm_f;
+        uv_norm_f << (float)feat.measurements[m].uv_norm[0], (float)feat.measurements[m].uv_norm[1];
+        Eigen::Matrix<float, 2, 1> res = uv_norm_f - z;
+        err += std::pow(res.norm(), 2);
     }
     return err;
 }
 
 bool single_gaussnewton(Feature& feat, const ClonesCamera& clones, const FeatureInitializerOptions& options) {
     if (feat.p_FinA[2] == 0.0) return false;
-    
-    double rho = 1.0 / feat.p_FinA[2];
-    double alpha = feat.p_FinA[0] * rho;
-    double beta = feat.p_FinA[1] * rho;
+
+    // alpha/beta DIVIDE by p_FinA[2]; they do not multiply by rho. The two are
+    // equal in exact arithmetic and differ by 1 ULP in doubles, and that
+    // difference is the seed of the whole refinement -- it propagates through
+    // every Gauss-Newton iteration.
+    double rho = 1 / feat.p_FinA[2];
+    double alpha = feat.p_FinA[0] / feat.p_FinA[2];
+    double beta = feat.p_FinA[1] / feat.p_FinA[2];
     
     double lam = options.init_lamda;
     double eps = 10000.0;
@@ -426,8 +489,9 @@ bool single_gaussnewton(Feature& feat, const ClonesCamera& clones, const Feature
             Hess.setZero();
             grad.setZero();
             
+            for (int cid = OV_CAM_FIRST; cid != OV_CAM_END; cid += OV_CAM_STEP)
             for (int m = 0; m < feat.num_measurements; ++m) {
-                int cid = feat.measurements[m].cam_id;
+                if (feat.measurements[m].cam_id != cid) continue;
                 double ts = feat.measurements[m].timestamp;
                 
                 const ClonePose* curr_pose = find_clone_pose(clones, cid, ts);
@@ -444,26 +508,28 @@ bool single_gaussnewton(Feature& feat, const ClonesCamera& clones, const Feature
                 double hi2 = R_AtoCi(1, 0)*alpha + R_AtoCi(1, 1)*beta + R_AtoCi(1, 2) + rho*p_AinCi[1];
                 double hi3 = R_AtoCi(2, 0)*alpha + R_AtoCi(2, 1)*beta + R_AtoCi(2, 2) + rho*p_AinCi[2];
                 
-                if (hi3 == 0.0) continue;
-                double hi3_sq = hi3 * hi3;
-                
-                double d_z1_d_alpha = (R_AtoCi(0, 0)*hi3 - hi1*R_AtoCi(2, 0)) / hi3_sq;
-                double d_z1_d_beta  = (R_AtoCi(0, 1)*hi3 - hi1*R_AtoCi(2, 1)) / hi3_sq;
-                double d_z1_d_rho   = (p_AinCi[0]*hi3 - hi1*p_AinCi[2]) / hi3_sq;
-                
-                double d_z2_d_alpha = (R_AtoCi(1, 0)*hi3 - hi2*R_AtoCi(2, 0)) / hi3_sq;
-                double d_z2_d_beta  = (R_AtoCi(1, 1)*hi3 - hi2*R_AtoCi(2, 1)) / hi3_sq;
-                double d_z2_d_rho   = (p_AinCi[1]*hi3 - hi2*p_AinCi[2]) / hi3_sq;
-                
+                // pow(hi3, 2) rather than hi3*hi3, and a FLOAT residual cast
+                // back to double for the gradient -- both are official's, both
+                // change the last bits. No hi3 == 0 guard either; official has
+                // none, and adding one silently drops a measurement.
+                double d_z1_d_alpha = (R_AtoCi(0, 0) * hi3 - hi1 * R_AtoCi(2, 0)) / (std::pow(hi3, 2));
+                double d_z1_d_beta = (R_AtoCi(0, 1) * hi3 - hi1 * R_AtoCi(2, 1)) / (std::pow(hi3, 2));
+                double d_z1_d_rho = (p_AinCi[0] * hi3 - hi1 * p_AinCi[2]) / (std::pow(hi3, 2));
+                double d_z2_d_alpha = (R_AtoCi(1, 0) * hi3 - hi2 * R_AtoCi(2, 0)) / (std::pow(hi3, 2));
+                double d_z2_d_beta = (R_AtoCi(1, 1) * hi3 - hi2 * R_AtoCi(2, 1)) / (std::pow(hi3, 2));
+                double d_z2_d_rho = (p_AinCi[1] * hi3 - hi2 * p_AinCi[2]) / (std::pow(hi3, 2));
+
                 Eigen::Matrix<double, 2, 3> H;
-                H << d_z1_d_alpha, d_z1_d_beta, d_z1_d_rho,
-                     d_z2_d_alpha, d_z2_d_beta, d_z2_d_rho;
-                     
-                Eigen::Vector2d z_pred(hi1 / hi3, hi2 / hi3);
-                Eigen::Vector2d res = feat.measurements[m].uv_norm - z_pred;
-                
-                grad += H.transpose() * res;
-                Hess += H.transpose() * H;
+                H << d_z1_d_alpha, d_z1_d_beta, d_z1_d_rho, d_z2_d_alpha, d_z2_d_beta, d_z2_d_rho;
+
+                Eigen::Matrix<float, 2, 1> z;
+                z << hi1 / hi3, hi2 / hi3;
+                Eigen::Matrix<float, 2, 1> uv_norm_f;
+                uv_norm_f << (float)feat.measurements[m].uv_norm[0], (float)feat.measurements[m].uv_norm[1];
+                Eigen::Matrix<float, 2, 1> res = uv_norm_f - z;
+
+                grad.noalias() += H.transpose() * res.cast<double>();
+                Hess.noalias() += H.transpose() * H;
             }
         }
         
@@ -472,14 +538,10 @@ bool single_gaussnewton(Feature& feat, const ClonesCamera& clones, const Feature
             Hess_l(r, r) *= (1.0 + lam);
         }
         
-        Eigen::ColPivHouseholderQR<Eigen::Matrix3d> solver(Hess_l);
-        if (std::abs(solver.determinant()) < 1e-12) {
-            recompute = false;
-            lam *= options.lam_mult;
-            continue;
-        }
-        
-        Eigen::Vector3d dx = solver.solve(grad);
+        // Official has no determinant guard here -- it always takes the step and
+        // lets the cost comparison below decide. The guard that used to sit
+        // here turned well-conditioned iterations into lambda increases.
+        Eigen::Vector3d dx = Hess_l.colPivHouseholderQr().solve(grad);
         double cost = compute_error(clones, feat, alpha + dx[0], beta + dx[1], rho + dx[2]);
         
         if (cost <= cost_old && (cost_old - cost) / cost_old < options.min_dcost) {
@@ -548,13 +610,15 @@ bool single_gaussnewton(Feature& feat, const ClonesCamera& clones, const Feature
     double dist = feat.p_FinA[2];
     double norm = feat.p_FinA.norm();
     
-    if (dist < options.min_dist ||
-        dist > options.max_dist ||
-        base_line_max == 0.0 ||
-        (norm / base_line_max) > options.max_baseline ||
-        std::isnan(norm)) {
+    if (dist < options.min_dist || dist > options.max_dist || std::isnan(norm)) {
+        ++gn_reject_dist;
         return false;
     }
+    if (base_line_max == 0.0 || (norm / base_line_max) > options.max_baseline) {
+        ++gn_reject_baseline;
+        return false;
+    }
+    ++gn_accept;
     
     feat.p_FinG = R_GtoA.transpose() * feat.p_FinA + p_AinG;
     return true;

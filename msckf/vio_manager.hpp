@@ -10,6 +10,14 @@
 
 namespace msckf {
 
+// Per-frame feature classification counters, defined in vio_manager.cpp.
+extern long cls_frames, cls_lost, cls_marginal, cls_maxtrack, cls_slam_update, cls_db_count;
+extern long cls_retire_untracked, cls_retire_chi2;
+
+// Per-stage accumulated wall time (ms), mirroring official OpenVINS's
+// record_timing_information columns so the two can be compared stage by stage.
+extern double stage_ms_propagate, stage_ms_msckf, stage_ms_slam, stage_ms_slam_delayed, stage_ms_marg;
+
 struct VioManagerOptions {
     double gravity_mag = 9.81;
     StateOptions state_opt;
@@ -27,6 +35,10 @@ struct VioManagerOptions {
     // chi2 gate, catastrophic silent divergence. Left off by default; the
     // MSCKF-only path is the verified 0.685 m ATE baseline on circle.bag.
     bool enable_slam = false;
+    // Seconds after the first processed image before any SLAM landmark may be
+    // created. Official's dt_slam_delay (1.0 on EuRoC); guards against
+    // anchoring landmarks on a state that has only just initialised.
+    double dt_slam_delay = 1.0;
     // Init trigger: true = wait for the takeoff "jerk" (still->moving), matching
     // official's default; works when the sequence has a clear stationary start
     // then a distinct jerk (KAIST). EuRoC MH's takeoff is too gentle for the
@@ -76,6 +88,9 @@ struct VioManagerData {
     int imu_count = 0;
     bool is_initialized = false;
     double initialized_time = -1.0;
+    // Timestamp of the first camera frame processed after initialization, used
+    // for the dt_slam_delay gate. Negative means "not started yet".
+    double slam_start_time = -1.0;
     int init_attempt = 0;
 };
 

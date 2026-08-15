@@ -2,10 +2,15 @@
 #include "../type/quat_ops.hpp"
 #include <Eigen/Dense>
 #include <iostream>
+#include <cstdio>
 #include <cassert>
 #include <cmath>
 
 namespace msckf {
+
+// Number of times EKFUpdate saw a negative covariance diagonal -- the condition
+// official Open_VINS treats as fatal. Reported by the runners at shutdown.
+long ekf_negative_diagonal_count = 0;
 
 type::Variable get_imu_pose(const type::Variable& imu) {
     type::Variable pose;
@@ -87,15 +92,10 @@ void EKFPropagation(State& state, type::Variable** order_NEW, int num_NEW,
         IMU_ERROR_STATE_CAPACITY * IMU_ERROR_STATE_CAPACITY];
     Eigen::Map<Eigen::MatrixXd> phi_cov_phi_t(
         phi_cov_phi_t_storage, size_order_NEW, size_order_NEW);
-    phi_cov_phi_t = Q;
-    for (int row = 0; row < size_order_NEW; ++row) {
-        for (int col = row + 1; col < size_order_NEW; ++col) {
-            const double symmetric = 0.5 *
-                (phi_cov_phi_t(row, col) + phi_cov_phi_t(col, row));
-            phi_cov_phi_t(row, col) = symmetric;
-            phi_cov_phi_t(col, row) = symmetric;
-        }
-    }
+    // Official: `Phi_Cov_PhiT = Q.selfadjointView<Eigen::Upper>()`. What was
+    // here averaged Q with its own transpose instead, which agrees only when Q
+    // is already exactly symmetric.
+    phi_cov_phi_t = Q.selfadjointView<Eigen::Upper>();
     
     current_it = 0;
     for (int i = 0; i < num_OLD; ++i) {
@@ -121,15 +121,13 @@ void EKFPropagation(State& state, type::Variable** order_NEW, int num_NEW,
     state.Cov.block(start_id, start_id, phi_size, phi_size) =
         phi_cov_phi_t;
     
-    // Ensure symmetry
-    for (int row = 0; row < total_size; ++row) {
-        for (int col = row + 1; col < total_size; ++col) {
-            const double symmetric = 0.5 * (state.Cov(row, col) + state.Cov(col, row));
-            state.Cov(row, col) = symmetric;
-            state.Cov(col, row) = symmetric;
-        }
-    }
-    
+    // No full-matrix symmetrisation here: official has none, and the three
+    // block writes above already leave the covariance as symmetric as official
+    // leaves it (the off-diagonal blocks are literal transposes of each other,
+    // the new diagonal block is symmetric by construction, and the rest of the
+    // matrix is untouched). The loop that used to be here was an invention that
+    // touched all N^2 entries with a cache-hostile stride every propagation --
+    // 0.309 -> 0.106 ms/frame on EuRoC MH_01 with 50 SLAM landmarks.
     for (int i = 0; i < total_size; ++i) {
         if (state.Cov(i, i) < 0.0) {
             std::cerr << "EKFPropagation() - diagonal at " << i << " is " << state.Cov(i, i) << "\n";
@@ -143,65 +141,69 @@ void EKFUpdate(State& state, type::Variable** H_order, int num_H,
                             const Eigen::MatrixXd& R) {
     assert(res.size() == R.rows());
     assert(H.rows() == res.size());
-    
+
+    // Transcribed from official StateHelper::EKFUpdate. What used to be here
+    // differed in three ways, all of them inventions:
+    //
+    //   1. It formed the full S, symmetrised it as 0.5*(S + S^T), and solved
+    //      with LDLT plus a CompleteOrthogonalDecomposition pseudo-inverse
+    //      fallback. Official builds S in the upper triangle only and solves
+    //      with an LLT on selfadjointView<Upper>.
+    //   2. It added 1e-9 to every diagonal of S as jitter. Official adds none.
+    //   3. It floored any covariance diagonal below 1e-12 up to 1e-12.
+    //      Official treats a negative diagonal as a corrupt filter: it prints
+    //      the index and exits. Flooring hides exactly the condition that
+    //      signals divergence, letting the filter keep running (and drifting)
+    //      instead of failing. The floor is gone; see the counter below.
+
     int total_size = state.cov_size;
     Eigen::MatrixXd M_a = Eigen::MatrixXd::Zero(total_size, res.size());
-    
+
     int current_it = 0;
     int H_id[100];
     for (int i = 0; i < num_H; ++i) {
         H_id[i] = current_it;
         current_it += H_order[i]->size;
     }
-    
+
     for (int i = 0; i < state.num_variables; ++i) {
         type::Variable* var = state.variables[i];
-        int var_id = var->id;
-        int var_sz = var->size;
-        
-        Eigen::MatrixXd M_i = Eigen::MatrixXd::Zero(var_sz, res.size());
+        Eigen::MatrixXd M_i = Eigen::MatrixXd::Zero(var->size, res.size());
         for (int k = 0; k < num_H; ++k) {
             type::Variable* meas_var = H_order[k];
-            Eigen::MatrixXd cov_block = state.Cov.block(var_id, meas_var->id, var_sz, meas_var->size);
-            Eigen::MatrixXd H_block = H.block(0, H_id[k], H.rows(), meas_var->size);
-            
-            M_i += cov_block * H_block.transpose();
+            M_i.noalias() += state.Cov.block(var->id, meas_var->id, var->size, meas_var->size) *
+                             H.block(0, H_id[k], H.rows(), meas_var->size).transpose();
         }
-        M_a.block(var_id, 0, var_sz, res.size()) = M_i;
+        M_a.block(var->id, 0, var->size, res.size()) = M_i;
     }
-    
+
     Eigen::MatrixXd P_small = get_marginal_covariance(state, H_order, num_H);
-    Eigen::MatrixXd S = H * P_small * H.transpose() + R;
-    S = 0.5 * (S + S.transpose());
-    
-    // Add jitter
-    for (int i = 0; i < S.rows(); ++i) {
-        S(i, i) += 1e-9;
-    }
-    
-    Eigen::MatrixXd K;
-    Eigen::LDLT<Eigen::MatrixXd> ldlt(S);
-    if (ldlt.info() == Eigen::Success) {
-        K = M_a * ldlt.solve(Eigen::MatrixXd::Identity(S.rows(), S.cols()));
-    } else {
-        Eigen::CompleteOrthogonalDecomposition<Eigen::MatrixXd> cod(S);
-        K = M_a * cod.pseudoInverse();
-    }
-    
-    Eigen::MatrixXd update_term = K * M_a.transpose();
-    state.Cov.block(0, 0, total_size, total_size) -= update_term;
-    state.Cov.block(0, 0, total_size, total_size) = 0.5 * (state.Cov.block(0, 0, total_size, total_size) + state.Cov.block(0, 0, total_size, total_size).transpose());
-    
-    // Floor negative variances
-    double min_var = 1e-12;
+    Eigen::MatrixXd S(R.rows(), R.rows());
+    S.triangularView<Eigen::Upper>() = H * P_small * H.transpose();
+    S.triangularView<Eigen::Upper>() += R;
+    Eigen::MatrixXd Sinv = Eigen::MatrixXd::Identity(R.rows(), R.rows());
+    S.selfadjointView<Eigen::Upper>().llt().solveInPlace(Sinv);
+    Eigen::MatrixXd K = M_a * Sinv.selfadjointView<Eigen::Upper>();
+
+    state.Cov.block(0, 0, total_size, total_size).triangularView<Eigen::Upper>() -= K * M_a.transpose();
+    state.Cov.block(0, 0, total_size, total_size) =
+        state.Cov.block(0, 0, total_size, total_size).selfadjointView<Eigen::Upper>();
+
+    // Official exits the process here. We count and report instead, so a run
+    // that would have died still produces a trajectory to diagnose -- but the
+    // count must be reported, never silently absorbed.
     for (int i = 0; i < total_size; ++i) {
-        if (state.Cov(i, i) < min_var) {
-            state.Cov(i, i) = min_var;
+        if (state.Cov(i, i) < 0.0) {
+            ++ekf_negative_diagonal_count;
+            if (ekf_negative_diagonal_count <= 10) {
+                std::fprintf(stderr, "[EKFUpdate]: negative covariance diagonal at %d is %.6g\n",
+                             i, state.Cov(i, i));
+            }
         }
     }
-    
+
     Eigen::VectorXd dx = K * res;
-    
+
     for (int i = 0; i < state.num_variables; ++i) {
         type::Variable* var = state.variables[i];
         Eigen::VectorXd update_vec = dx.segment(var->id, var->size);
@@ -364,42 +366,40 @@ bool initialize(State& state, type::Variable* new_variable,
     Eigen::MatrixXd H_R_wk = H_R;
     Eigen::VectorXd res_wk = res;
     
-    // QR decomposition
-    Eigen::HouseholderQR<Eigen::MatrixXd> qr(H_L_wk);
-    Eigen::MatrixXd Q_mat = qr.householderQ();
-    
-    Eigen::MatrixXd H_L_qr = Q_mat.transpose() * H_L_wk;
-    Eigen::MatrixXd H_R_qr = Q_mat.transpose() * H_R_wk;
-    Eigen::VectorXd res_qr = Q_mat.transpose() * res_wk;
-    
-    // Separate
-    Eigen::MatrixXd Hxinit = H_R_qr.topRows(new_var_size);
-    Eigen::MatrixXd H_finit = H_L_qr.topLeftCorner(new_var_size, new_var_size);
-    Eigen::VectorXd resinit = res_qr.head(new_var_size);
+    // Official triangularises H_L with in-place GIVENS rotations, applying the
+    // same rotations to res and H_R. This used a HouseholderQR with an
+    // explicitly formed Q and then multiplied Q^T through -- the identical
+    // mistake already fixed once in nullspace_project_inplace (parity manual,
+    // divergence #22). The two produce DIFFERENT orthonormal bases, so
+    // Hxinit / H_finit / resinit / Hup / resup all come out different, which
+    // means every SLAM landmark entered the state with a different initial
+    // estimate and covariance than official would have given it.
+    Eigen::JacobiRotation<double> tempHo_GR;
+    for (int n = 0; n < H_L_wk.cols(); ++n) {
+        for (int m = (int)H_L_wk.rows() - 1; m > n; m--) {
+            tempHo_GR.makeGivens(H_L_wk(m - 1, n), H_L_wk(m, n));
+            (H_L_wk.block(m - 1, n, 2, H_L_wk.cols() - n)).applyOnTheLeft(0, 1, tempHo_GR.adjoint());
+            (res_wk.block(m - 1, 0, 2, 1)).applyOnTheLeft(0, 1, tempHo_GR.adjoint());
+            (H_R_wk.block(m - 1, 0, 2, H_R_wk.cols())).applyOnTheLeft(0, 1, tempHo_GR.adjoint());
+        }
+    }
+
+    Eigen::MatrixXd Hxinit = H_R_wk.block(0, 0, new_var_size, H_R_wk.cols());
+    Eigen::MatrixXd H_finit = H_L_wk.block(0, 0, new_var_size, new_var_size);
+    Eigen::VectorXd resinit = res_wk.block(0, 0, new_var_size, 1);
     Eigen::MatrixXd Rinit = R.block(0, 0, new_var_size, new_var_size);
-    
-    int up_rows = H_R_qr.rows() - new_var_size;
-    Eigen::MatrixXd Hup = H_R_qr.bottomRows(up_rows);
-    Eigen::VectorXd resup = res_qr.tail(up_rows);
-    Eigen::MatrixXd Rup = R.block(new_var_size, new_var_size, up_rows, up_rows);
-    
-    // Chi-Square Test
+
+    Eigen::MatrixXd Hup = H_R_wk.block(new_var_size, 0, H_R_wk.rows() - new_var_size, H_R_wk.cols());
+    Eigen::VectorXd resup = res_wk.block(new_var_size, 0, res_wk.rows() - new_var_size, 1);
+    Eigen::MatrixXd Rup = R.block(new_var_size, new_var_size, R.rows() - new_var_size, R.rows() - new_var_size);
+
+    // Official: no symmetrisation, no jitter, and an LLT rather than an LDLT.
     Eigen::MatrixXd P_up = get_marginal_covariance(state, H_order, num_H);
     Eigen::MatrixXd S = Hup * P_up * Hup.transpose() + Rup;
-    S = 0.5 * (S + S.transpose());
-    for (int i = 0; i < S.rows(); ++i) {
-        S(i, i) += 1e-9;
-    }
-    
-    double chi2_val = 99999.9;
-    Eigen::LDLT<Eigen::MatrixXd> ldlt(S);
-    if (ldlt.info() == Eigen::Success) {
-        chi2_val = resup.dot(ldlt.solve(resup));
-    }
-    
-    int dof = res.size();
-    double chi2_check = chi2_ppf_95(dof);
-    
+    double chi2_val = resup.dot(S.llt().solve(resup));
+
+    const double chi2_check = chi2_ppf_95((int)res.size());
+
     if (chi2_val > chi_2_mult * chi2_check) {
         return false;
     }

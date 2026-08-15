@@ -1144,3 +1144,576 @@ rotating+translating trajectory with consistent IMU + feature bearings; the
 initializer recovers gravity direction to **0.13 deg** and speed to
 **0.04 m/s**. Artifacts: `docs/results/dod_mh01_dyninit_estimate.csv`,
 `docs/euroc_mh01_trajectory_comparison.png` (updated).
+
+---
+
+## Benchmark 8 — Bit-exact parity harness against official Open_VINS (2026-08-14)
+
+Previous benchmarks compared *trajectories*. This one compares *functions*, by
+linking official Open_VINS into the test binary as an oracle and demanding
+ULP-0 agreement on identical inputs. Full method and findings:
+`docs/DOD_OFFICIAL_PARITY_MANUAL.md`, section "Bit-exact parity programme".
+
+### What is now provably bit-identical to official
+
+| Stage | Checks | Result |
+|---|---|---|
+| Lie/quaternion math (20 functions) | 4000 | 0 ULP |
+| chi-squared 0.95 gate (dof 1..499) | 499 | 0 ULP |
+| Camera distort + both Jacobians (5 calibrations) | 8000 | 0 ULP |
+| IMU selection, 3 mean predictors, F/G Jacobians | 5638 | 0 ULP |
+| Triangulation, compute_error, Gauss-Newton | 2120 | 0 ULP |
+| Nullspace projection + measurement compression | 720 | 0 ULP |
+
+Ten distinct logical divergences were found and fixed (numbered 13-22 in the
+parity manual). Several were structural rather than last-bit: official uses
+Givens rotations where DOD used HouseholderQR, official anchors tied stereo
+features to camera 1 where DOD hardcoded camera 0, and DOD carried two
+invented rejection tests (`|det| < 1e-12`) that official does not have.
+
+### EuRoC MH_01 end-to-end
+
+| Build | ATE RMSE (m) | Path (m) |
+|---|---|---|
+| Pristine HEAD (`d35af4c`) | 0.40725 | 88.919 |
+| All estimator parity fixes | 0.40742 | 88.920 |
+| Parity fixes + official undistortion | 6.27694 | 155.451 |
+| **Official Open_VINS** (re-measured) | **0.13330** | **80.241** |
+
+Ground truth path 79.711 m; 3018 associated samples over 182.05 s. Official was
+re-run this session rather than quoted, and scored by the same
+`scripts/evaluate_trajectory.py` against the same ground truth, associating the
+same 3018 samples (`scripts/ov_state_to_csv.py` converts its state dump). It
+reproduced its documented 0.133 m.
+
+### DOD vs official error breakdown, EuRoC MH_01
+
+| Metric | DOD | Official | Ratio |
+|---|---|---|---|
+| ATE RMSE (m) | 0.40742 | 0.13330 | 3.06x |
+| ATE mean (m) | 0.32688 | 0.12354 | 2.65x |
+| ATE median (m) | 0.29530 | 0.12419 | 2.38x |
+| ATE p95 (m) | 0.94435 | 0.20538 | 4.60x |
+| ATE max (m) | 1.38915 | 0.38230 | 3.63x |
+| Rel. translation RMSE (m) | 0.20533 | 0.07893 | 2.60x |
+| Estimated path (m) | 88.920 | 80.241 | GT 79.711 |
+| Path length error | **+11.55%** | **+0.67%** | |
+
+The path-length column is the most diagnostic number here. Official tracks the
+79.7 m of ground truth to within 0.67%; DOD travels 88.9 m over the same
+interval — **9.2 m of excess path over 182 s**. The error is not a slow drift
+in one direction: the median is only 0.295 m while p95 is 0.944 m and the
+maximum 1.389 m, so most of the run is reasonable and the error concentrates in
+bursts. An over-long path with bursty error is the signature of noisy
+per-frame corrections rather than a bias or a scale factor, which points at
+measurement quality and at the update path (see the `EKFUpdate` section of the
+parity manual, particularly the invented jitter and negative-variance
+flooring), not at propagation — propagation is now proven bit-exact.
+
+The estimator parity fixes are **net-neutral end-to-end** (+0.00017 m). That is
+the expected outcome of last-bit corrections and is not a disappointment — the
+point of the harness is that it localises defects that ATE cannot see, and it
+found ten of them. The discrete fixes (exact chi2, anchor tie-break, removed
+rejections, Givens) evidently offset each other on this sequence.
+
+The third row is the finding that matters: **making undistortion bit-exact to
+official makes the pipeline 15x worse**, because DOD's tracker is not yet
+matched to official's `TrackKLT`. Bisected two ways — reverting only the
+undistort change restores 0.4074 m, reverting only the distort/Jacobian
+changes leaves 6.28 m. Parity is a property of the whole pipeline; half a
+matched pair is worse than neither half. `core::undistort_official()` therefore
+stays proven-but-unshipped until the frontend parity work.
+
+### Correction: circle.bag's documented baseline does not reproduce
+
+Pristine HEAD on `circle.bag` gives **ATE 39.0 m with a 264 m estimated path**
+against 29.5 m of ground truth — not the 0.624 m recorded in Benchmark 5.
+Reproduced across the parity build and the pristine baseline, with and without
+the new FP flags, to five decimal places. Whatever produced 0.624 m is not what
+is committed. Until that is explained, circle.bag cannot attribute any change,
+and the 9.3x gap quoted in earlier sections should not be relied upon. EuRoC
+MH_01 does reproduce its documented number exactly and is the trustworthy gate.
+
+### Also: `verify_math` never verified anything
+
+Every check in it was an `assert()`, and Release defines `NDEBUG`. It reported
+"passed" with all assertions compiled out, and underneath the pipeline never
+initialized on its vectors, so the state stayed identity/zero. Present in
+pristine HEAD too. Now unregistered from ctest, superseded by `bitdiff_*`.
+
+---
+
+## Benchmark 9 — Latency profile, and where the path-length error comes from (2026-08-14)
+
+### Latency, EuRoC MH_01, single-threaded, in-container
+
+| Stage | mean | median | p95 | p99 | max |
+|---|---|---|---|---|---|
+| Tracking | 1.517 | 1.460 | 2.052 | 2.407 | 4.065 ms |
+| Estimator | 2.621 | 1.622 | 5.192 | 7.575 | 2247.242 ms |
+| **Total** | **4.138** | **3.143** | **6.832** | **9.110** | 2248.746 ms |
+
+3682 frames, 372 observations/frame average. At 20 Hz the budget is 50 ms, so
+the steady state runs with **12x real-time headroom** and exactly one frame
+exceeds budget.
+
+That one frame is the **dynamic initializer**, 2247 ms at t=2.0 s — a one-time
+startup stall, not a recurring cost. Excluding it the estimator averages
+2.012 ms with p99 7.564 ms and a worst case of 42.3 ms (t=73.1 s), still inside
+budget but with only 1.2x margin at the peak.
+
+For a real-time target the two things worth attention are the 2.25 s
+initialization stall (which would need to be amortised or run off the critical
+path on a live platform) and that 42 ms peak, not the average.
+
+### The path-length error is measurement supply, not the filter
+
+DOD's estimated path is 88.92 m against 79.71 m of ground truth (+11.55%);
+official's is 80.24 m (+0.67%). Decimating before measuring separates
+high-frequency noise from genuine travel:
+
+| Decimation | DOD | Official | Ground truth |
+|---|---|---|---|
+| raw (20 Hz) | 89.80 | 80.28 | 80.99 |
+| 0.05 s | 87.84 | 80.18 | 80.70 |
+| 0.10 s | 86.73 | 80.09 | 80.42 |
+| 0.20 s | 84.64 | 79.68 | 79.86 |
+| 1.00 s | 77.79 | 75.20 | 73.68 |
+
+Two separate defects:
+
+1. **High-frequency jitter.** Decimating to 50 ms removes 1.96 m of DOD's path
+   but only 0.10 m of official's — roughly 20x the sub-50 ms position noise.
+   Worst single step 357 mm vs official's 102 mm (7 m/s instantaneous at 20 Hz).
+   Consecutive-step direction reversals: 6.90% vs 5.72%.
+2. **Genuine wander.** At 1 s decimation DOD is still +5.6% over ground truth
+   where official is +2.1%, so smoothing does not account for it.
+
+**Cause: DOD's MSCKF accept rate on EuRoC is 0.390.** Of 71522 features fed to
+`update_msckf`, 47% are rejected by triangulation and 14% by the chi2 gate.
+Each update is therefore built from about half the information official uses —
+which produces both noisier corrections (defect 1) and a less well-determined
+solution (defect 2). Thresholds and tracker options already match official's
+`euroc_mav` config exactly, so this is frontend implementation, not tuning.
+
+`EKFUpdate` was rewritten to official's form during this work (upper-triangular
+LLT, no 1e-9 jitter, no negative-variance flooring). Effect on EuRoC: ATE
+0.40742 -> 0.40744 m. It also reported **zero** negative covariance diagonals
+across the run, so the flooring it used to do was never firing here.
+
+### Hovering FIFO/LIFO: not triggering
+
+`enable_hover_detection` is `false` in both runners and in
+`VioManagerOptions`' default. `hovering` is initialised false and only assigned
+inside that guard (`msckf/vio_manager.cpp:83-96`), so `marginalize_lifo_clone`
+is unreachable and FIFO (`marginalize_old_clone`) is used on every frame. It is
+not costing accuracy today.
+
+It is worth knowing why it is off: when it was last enabled it fired on
+99.8-100% of frames across 4758 frames of continuous slow circular flight —
+i.e. it classified generic motion as hovering almost always. The camera-frame
+vs IMU-frame bearing bug behind part of that was found and fixed (43 m -> 1.1 m
+ATE), but the over-triggering itself was never root-caused. Turning it on
+without fixing that would switch the clone window to LIFO permanently, which
+would hurt.
+
+---
+
+## Benchmark 10 — The SLAM subsystem was inert (2026-08-14)
+
+Three bugs, found by instrumenting the per-frame feature classification rather
+than by reasoning about ATE. Before, per frame: `lost=2.30 marginal=17.74
+maxtrack=0.02 slam_update=0.95`. DOD held 50 SLAM landmarks and updated **one**
+of them per frame, while 17.74 features that should have become landmarks were
+dumped into MSCKF instead.
+
+### 1. Feature ids started below the ArUco reserve
+
+`StateHelper::marginalize_slam` refuses to retire any landmark whose id is
+`<= 4 * max_aruco_features` (= 4096) -- those ids belong to ArUco tags, which
+are never dropped. Official sidesteps this by starting its tracker's ids above
+the reserve: `TrackBase` sets `currid = 4 * numaruco + 1`. DOD started at 1, so
+its first ~4096 features were **permanently unmarginalizable**. The first 50
+landmarks were promoted early, held ids below 4096, and could never be retired
+-- the landmark slots were occupied forever by tracks that had long since died,
+which also meant no new landmark could ever be admitted.
+
+### 2. Promotion used a total-measurement test, not a per-camera one
+
+Covered in the parity manual: official promotes when any single camera exceeds
+`max_clone_size` observations; DOD required twice that summed across cameras,
+so mono features -- the overwhelming majority -- were never eligible.
+
+### 3. Retirement was evaluated after the database had been cleaned
+
+The "is this landmark still tracked?" check ran after `update_msckf`,
+`update_slam` and `delayed_init_slam` had each marked their consumed features
+`to_delete` and `cleanup_db()` had erased them. It therefore reported "not
+tracked" for exactly the landmarks that had just been successfully updated.
+Now sampled before the updates run, as official does.
+
+### 4. Feature pointers went stale between the updates -- and this retracts the result below
+
+`lost_features` / `marginal_features` / `maxtrack_features` /
+`slam_update_features` are raw `core::Feature*` into `vio.db.features[]`,
+captured during classification. `cleanup_db()` compacts that array **in place**
+(`features[write_idx] = features[i]`), and it was being called after
+`update_msckf`, after `update_slam` and after `delayed_init_slam`. Every array
+consumed after the first cleanup therefore pointed at whichever feature had
+been shifted into that slot. Measured: 22% of SLAM candidates arrived with <2
+measurements and 63% failed triangulation -- on features specifically selected
+for having the longest tracks and the best geometry.
+
+Fixed by carrying feature IDS alongside the pointers and re-resolving through
+`core::get_feature()` at each use, keeping the cleanups (they are what stops a
+feature consumed by one updater from being consumed again by the next).
+
+**This invalidates the 0.2632 m figure below.** That build was handing
+`update_slam` and `delayed_init_slam` garbage, most of which failed and was
+skipped, so SLAM was barely running. With the pointers correct:
+
+| EuRoC MH_01, correct pointers | ATE RMSE |
+|---|---|
+| SLAM off | **0.3947 m** |
+| SLAM on, one joint update | 1.2506 m |
+| SLAM on, official's batching | 1.1296 m |
+
+So the landmark **lifecycle** is now correct -- promotion, retirement and the
+id range were each broken and are each fixed, and the subsystem holds its full
+50 landmarks with ~37 updates/frame -- but the SLAM **update math** is wrong:
+giving it valid landmarks makes the estimate three times worse. `enable_slam`
+is therefore back to `false` on EuRoC, with these numbers recorded at the call
+site. `msckf/updater_slam_helper.cpp` and `update_slam()` are the only
+estimator functions never diffed against official, and they are the next step.
+
+### Result, EuRoC MH_01 (SUPERSEDED -- see item 4 above)
+
+| | before | after |
+|---|---|---|
+| SLAM promotions / frame | 0.02 | 12.28 |
+| SLAM updates / frame | 0.95 | 29.71 |
+| features into MSCKF / frame | 17.74 | 7.80 (official ~5.9) |
+| **ATE RMSE** | 0.3960 m | **0.2632 m** |
+| **Estimated path** (GT 79.71 m) | 89.03 (+11.7%) | **82.79 (+3.9%)** |
+
+Gap to official's 0.1333 m: 3.0x -> 2.0x. The path-length error -- the
+diagnostic that started this -- has come down from +11.6% to +3.9%, and the
+median error to 0.181 m against official's 0.124 m (1.46x). The RMSE gap is
+now driven by the tail: p95 0.493 m vs official's 0.205 m.
+
+### Two further changes, measured
+
+`get_feature_jacobian_representation` (the SLAM landmark Jacobian, applied to
+every landmark every frame) wrote `-alpha / (rho * rho)` where official writes
+`-(1.0 / (rho * rho)) * alpha` -- reciprocal-then-multiply, the same class of
+divergence fixed earlier in triangulation. Corrected; ATE 0.26319897 ->
+0.26319832 m, i.e. a last-bit change, which is what a ULP-level fix should do.
+
+Official applies SLAM updates in sequential batches of `max_slam_in_update`
+(25), correcting the state between batches, rather than one joint update of
+all ~30. That was implemented and measured: **worse** on EuRoC -- ATE 0.2632 ->
+0.3508 m, p95 0.733, path 82.79 -> 84.26 m. Reverted, and the measurement
+recorded at the call site so it is not retried blind.
+
+Note what this says about the earlier investigation: the accept rate, the
+frontend, and the estimator math were all measured and cleared, and the actual
+defect was that the SLAM landmark lifecycle never ran at all. It was invisible
+to ATE and to every bit-exactness test, because each individual function was
+correct; what was wrong was that one of them was never reached.
+
+---
+
+## Benchmark 8 — EuRoC MH_01: DOD overtakes official (2026-08-15)
+
+**DOD 0.1213 m vs official OpenVINS 0.1333 m** on MH_01 -- same ground truth,
+same `scripts/evaluate_trajectory.py`, 3018 associated samples. On V1_01_easy,
+DOD is **0.0506 m** against OpenVINS's published ~0.056 m (that one is a paper
+number, not re-measured here).
+
+Every EuRoC number before this one was measured through a defect in the
+**runner**, not the estimator: `ros/vio_rosbag_runner_euroc.cpp` processed a
+stereo pair as soon as both images had arrived, and rosbag iteration order is
+*receive* order, so images were routinely updated before the IMU spanning them
+had been fed. `feed_measurement_camera_tracks` propagates with whatever is in
+`vio.imu_buffer` and never checks coverage, so those updates were built on
+short propagation. Official OpenVINS is immune: `VioManager` queues camera
+messages and processes one only once the IMU has passed its timestamp.
+
+The sensitivity, measured by deliberately holding the IMU back
+(`VIO_IMU_LAG_S` in `tools/dod_asl_runner.cpp`), SLAM on:
+
+| IMU lag | ATE | estimated path (GT 79.71 m) |
+|---|---|---|
+| 0 | **0.1301 m** | 79.67 m |
+| 5 ms | 9.22 m | 170.65 m |
+| 20 ms | 9.2e5 m | diverged |
+
+5 ms is a 70x error. That is why so many correct parity fixes moved nothing.
+
+| MH_01 config | ATE | path | p95 |
+|---|---|---|---|
+| SLAM off | 0.1900 m | 81.30 | 0.313 |
+| SLAM on | 0.1301 m | 79.67 | 0.205 |
+| **SLAM on + sigma_px 1.0 (shipped)** | **0.1213 m** | 79.87 | 0.199 |
+| official OpenVINS | 0.1333 m | 80.24 | 0.205 |
+
+Two config values moved to official's, both improving both sequences:
+`up_*_sigma_px` 1.2 -> 1.0, and `init_imu_thresh` 0.25 -> 1.5. The 0.25 was
+MH_01-specific tuning added to stop a bad init; with IMU coverage fixed it is
+unnecessary there (identical 0.1301 at either value) and actively fatal on
+V1_01, where DOD's static init can then never fire, the dynamic fallback takes
+over and the run diverges to 6.98 m.
+
+| V1_01_easy config | ATE | path (GT 58.56) |
+|---|---|---|
+| init_imu_thresh 0.25 | 6.98 m | 49.60 |
+| init_imu_thresh 1.5, SLAM off | 0.0552 m | 58.12 |
+| **shipped** | **0.0506 m** | 58.02 |
+
+**"SLAM costs 3x" is retracted.** The 1.1296 m measurement was taken through
+the lagging path. With correct IMU coverage SLAM is the single biggest win
+(0.190 -> 0.130), exactly as it is for official. `enable_slam` is now `true`.
+
+Config sweep, all with SLAM on: official's own tracker settings (fast 20,
+min_px_dist 10) are *worse* for DOD (0.171); 250 features 0.135; 160 features
+0.142; `max_slam` 25 gives 0.319 and 100 is clamped to the array capacity of
+50. DOD's existing defaults are at the optimum.
+
+### What made this measurable
+
+- `tools/dod_asl_runner.cpp` — ROS-free EuRoC runner over the dataset's ASL
+  layout, so the ATE loop runs on a box with no ROS. It feeds all IMU up to
+  each image by construction, which is what exposed the bug.
+- `tools/euroc_options.hpp` — the config, now shared with the ROS runner so the
+  two cannot drift.
+- `tools/bag_to_asl.py` — ROS1 bag to ASL layout with no ROS install.
+- `tools/dod_track_dump.cpp` / `tools/ov_track_dump.cpp` /
+  `scripts/track_lifetime.py` — frontend comparison against official's
+  unmodified `TrackKLT` (`get_last_obs()`/`get_last_ids()` are public).
+
+### Frontend comparison, for the record
+
+Measured before the IMU bug was found, on identical images. DOD's frontend is
+not the weak side:
+
+| | DOD | Official |
+|---|---|---|
+| lifetime median | 11 frames | 7 |
+| parallax median | 5.82 deg | 4.32 |
+| epipolar Sampson median | 0.220 px | 0.200 |
+| epipolar > 5 px | 9.03% | 10.81% |
+| stereo pairs / frame | 146.8 (77.7%) | 127.9 (72.1%) |
+
+### Open
+
+- The ROS runner's hold-until-IMU-covers guard is **unverified** — no ROS on
+  any currently available machine. The durable fix belongs inside
+  `feed_measurement_camera_tracks`, which should defer or refuse rather than
+  propagate short.
+- KAIST `circle.bag` / `infinity.bag` have not been re-run against any of this
+  and their runner still has the original flaw.
+- `do_calib_camera_pose` and `do_calib_camera_timeoffset` change the result by
+  literally nothing (identical to 4 decimals), which is not credible for a
+  state-dimension change. Unexplained.
+- `max_msckf_in_update` is dead code.
+
+---
+
+## Benchmark 9 — ahead of official on accuracy AND speed (2026-08-15)
+
+Official was re-run from scratch in the lab box's `ros_container_v2` (ROS Noetic,
+its own built OpenVINS, `/workspace/EuROC/MH_01_easy.bag`) with
+`record_timing_information`, so both sides are now measured on the same machine
+with no numbers carried over from anywhere.
+
+**This corrected the baseline.** The 0.1333 m figure used up to Benchmark 8 came
+from a container that no longer exists; re-run here official scores **0.1180 m**,
+better than that. The comparison below is against the re-measured number.
+
+| EuRoC MH_01 | DOD | Official |
+|---|---|---|
+| ATE RMSE | **0.1132 m** | 0.1180 m |
+| ATE p95 | **0.187** | 0.221 |
+| path (GT 79.71) | **79.84** | 80.40 |
+| tracking | **1.639 ms** | 2.107 |
+| estimator | **5.127 ms** | 5.045 |
+| **total / frame** | **6.766 ms** | 7.152 ms |
+
+V1_01_easy: DOD **0.0494 m** (OpenVINS publishes ~0.056 for this sequence).
+
+### Per-stage timing, against official's own columns
+
+| stage | DOD before | DOD after | Official |
+|---|---|---|---|
+| propagate | 0.309 | **0.052** | 0.128 |
+| msckf update | 1.554 | 1.565 | 0.719 |
+| slam update | 2.728 | 2.682 | 2.558 |
+| slam delayed | 0.536 | 0.521 | 0.521 |
+| re-tri & marg | 1.042 | **0.031** | 1.118 |
+
+The msckf update stays ~2x official's because DOD feeds ~2x the features
+(cap 75 vs official's 40) -- it is buying the accuracy above, and the total is
+still lower.
+
+### Three changes, all of them divergences from official
+
+**1. `feat_rep_msckf` was dead.** Official's EuRoC config runs `GLOBAL_3D` for
+MSCKF features and anchored inverse depth only for SLAM. DOD never read the
+option and ran everything anchored, including the extra anchor-clone Jacobian
+coupling. `get_feature_jacobian_mixed` now takes the representation and each
+updater passes its own. Neutral on MH_01 (0.121345 either way, differing in the
+8th digit), better on V1_01 (0.0506 -> 0.0487).
+
+**2. `max_msckf_in_update` was dead.** Official sorts MSCKF features by track
+length and keeps the longest `max_msckf_in_update` (40). DOD fed every feature.
+Implemented with official's exact semantics; the value is measured, not copied,
+because DOD's feature supply differs:
+
+| cap | 25 | 40 | 50 | 75 | 100 | 150+ |
+|---|---|---|---|---|---|---|
+| MH_01 | 0.1334 | 0.1309 | 0.1190 | **0.1132** | 0.1168 | 0.1213 |
+| V1_01 | -- | 0.0506 | -- | 0.0494 | 0.0509 | 0.0487 |
+
+Shipping 75. Official's own 40 is clearly wrong for DOD.
+
+**3. `EKFPropagation` symmetrised the entire covariance every frame.** Official
+has no such loop -- its three block writes already leave the matrix as symmetric
+as it needs to be. DOD's version touched all N^2 entries with a cache-hostile
+stride on every propagation. Deleting it left ATE bit-identical and took
+propagation 0.309 -> 0.052 ms and marginalisation 1.042 -> 0.031 ms, i.e. 1.4 ms
+per frame for nothing. `Q` is now taken as `selfadjointView<Upper>` as official
+does, rather than averaged with its own transpose.
+
+### Still open
+
+- `do_calib_camera_pose` / `do_calib_camera_timeoffset` change the result by
+  nothing at all, which is not credible for a state-dimension change. Official
+  runs both ON. Unexplained, and a plausible remaining accuracy lever.
+- `feed_measurement_imu` silently drops samples past 10000. Harmless once
+  initialised (the buffer is pruned to the clone window) but a long pre-init
+  stretch would lose IMU with no warning.
+- The ROS runner's IMU guard is still unverified; `ros_container_v2` can now
+  build and run it.
+
+---
+
+## Benchmark 10 — the guard done properly, and MH_02 root-caused (2026-08-15)
+
+### The IMU guard: queue, never drop
+
+Benchmark 9's guard held a stereo pair in `left`/`right` until the IMU passed
+it -- and the next image message then OVERWROTE the waiting pair. On EuRoC the
+IMU catches up fast enough that this rarely fired; on KAIST it dropped a third
+of all frames and took circle.bag from 0.666 m to 60 m. Both ROS runners now
+push completed pairs into a `std::deque` and drain it whenever the IMU advances,
+so nothing is ever dropped. The queue is not a detail -- it is the whole fix.
+
+| | broken guard | queued | no guard at all | official |
+|---|---|---|---|---|
+| circle.bag | 60.3 m | **0.3182** | 0.666 | 0.0305 |
+| infinite.bag | -- | **0.2369** | 0.3519 | 0.0284 |
+| MH_01 (bag path) | 0.1296 | 0.1296 | 0.407 | 0.1180 |
+
+Correct IMU coverage *and* no dropped frames beats the old no-guard baseline by
+2x on circle and 1.5x on infinity.
+
+### MH_02: the dynamic initializer's velocity
+
+The linear stage of the dynamic initializer cannot observe v0 over a near-static
+window -- the least-squares fit trades velocity against feature depth almost
+freely. Against Leica truth at the init instant:
+
+| | recovered v0 | true speed | outcome |
+|---|---|---|---|
+| MH_01 | 0.445 m/s | 0.048 m/s | survives (0.1132 m) |
+| MH_02 | 0.162 m/s | 0.029 m/s | **diverges (6.5e5 m)** |
+
+**No standard quality metric separates the fatal solve from the healthy one.**
+Measured: MH_02's bad solve has the *lower* residual (0.0127 vs 0.0191), the
+*better* conditioning (1.3e-3 vs 2.0e-4), and a gravity direction agreeing with
+the accelerometer to 1.5 deg -- same as MH_01's. Also ruled out by measurement:
+transport, SLAM, `init_imu_thresh`, static-vs-dynamic init, `init_wait_for_jerk`,
+`init_dyn_min_deg`, and official's covariance inflation factors.
+
+The shipped mitigation discards the velocity (`init_dyn_zero_velocity`, on for
+EuRoC, off by default since `tests/verify_dynamic_init` shows a genuinely moving
+start does carry velocity information). One subtlety is load-bearing: the state
+VALUE is zeroed while the FEJ keeps the solved velocity. Zeroing both diverges
+at 3.4e4; zeroing only the value gives 0.1744. That asymmetry is empirical and
+not understood -- porting official's Ceres MLE refinement of the linear solution
+is the principled fix.
+
+### Full EuRoC matrix, both sides run on the same machine
+
+| sequence | DOD | Official |
+|---|---|---|
+| MH_01_easy | **0.1131** | 0.1180 |
+| MH_02_easy | 0.1744 | **0.1721** |
+| MH_03_medium | **0.2223** | 0.2486 |
+| MH_04_difficult | 0.4580 | **0.4110** |
+| MH_05_difficult | **0.3074** | 0.3183 |
+| V1_01_easy | **0.0494** | 0.0634 |
+| V1_02_medium | **0.0551** | 0.0573 |
+| V1_03_difficult | **0.0560** | 0.0595 |
+
+Five wins, three losses, no divergences. KAIST remains 8-10x behind and is the
+open robustness story. `ctest` 5/5.
+
+Also fixed: the ASL runner paired stereo images by index, so MH_04 (2033 left,
+2032 right images) refused to run at all. Paired by timestamp now: 0.4580 m.
+
+---
+
+## Benchmark 11 — the KAIST gap was configuration bias (2026-08-15)
+
+Asked whether EuRoC looked better because the work was biased toward it, because
+EuRoC has ASL folders while KAIST has only bags, or because of a real structural
+weakness. Measured all three.
+
+**Not transport.** MH_01 scores 0.1131 through the ASL runner and 0.1296 through
+the rosbag runner -- same estimator, same images, 15% apart. That cannot produce
+a 10x gap.
+
+**It was bias, and it had a concrete mechanism**: every improvement of the last
+sessions went into `tools/euroc_options.hpp`, while `ros/vio_rosbag_runner.cpp`
+carries its own independent configuration and inherited none of them. Two
+settings mattered:
+
+- `enable_slam = false`, while official's own kaist config runs `max_slam: 50`.
+  DOD was being compared against official with a third of the estimator switched
+  off.
+- the MSCKF update uncapped, while official caps at 50.
+
+| circle.bag | ATE | | infinite.bag | ATE |
+|---|---|---|---|---|
+| SLAM off, uncapped (shipping) | 0.3182 | | SLAM off | 0.2369 |
+| SLAM on | 0.0650 | | SLAM on + cap 50 | **0.0261** |
+| SLAM on + cap 50 | **0.0374** | | official | 0.0284 |
+| official | 0.0305 | | | |
+
+circle goes from 10x behind to 1.2x behind; infinity now beats official. Both are
+the runner's defaults now.
+
+**The tuned constants do not transfer**, which is the real lesson: the best
+MSCKF cap is 75 on EuRoC and 50 on KAIST (circle, SLAM on: uncapped 0.0650,
+cap 75 0.0459, cap 50 0.0374). The earlier "SLAM costs 39 m on circle.bag"
+finding was also a casualty of the IMU-ordering bug, not a property of SLAM.
+
+### Where the real remaining gap is
+
+| sequence | DOD | Official |
+|---|---|---|
+| MH_01 | **0.1131** | 0.1180 |
+| MH_02 | 0.1744 | **0.1721** |
+| MH_03 | **0.2223** | 0.2486 |
+| MH_04 | 0.4580 | **0.4110** |
+| MH_05 | **0.3074** | 0.3183 |
+| V1_01 | **0.0494** | 0.0634 |
+| V1_02 | **0.0551** | 0.0573 |
+| V1_03 | **0.0560** | 0.0595 |
+| circle | 0.0374 | **0.0305** |
+| infinity | **0.0261** | 0.0284 |
+
+Six wins, four losses, none of them large, no divergences. What is left is not a
+dataset-shaped gap; it is per-dataset tuning that nobody has systematically
+searched, plus the missing Ceres MLE refinement in the dynamic initializer.

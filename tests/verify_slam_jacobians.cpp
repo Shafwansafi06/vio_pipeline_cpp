@@ -34,6 +34,33 @@ Eigen::Vector2d predict_pixel(const type::Variable& landmark, const type::Variab
     return core::distort(cam, normalized);
 }
 
+// Same forward model, but distorting in full double precision.
+//
+// core::distort rounds its result to float32 because official Open_VINS does
+// (CamBase::distort_d). That quantisation is ~3e-5 px at these focal lengths,
+// which swamps a 1e-6 finite-difference step and makes the numeric derivative
+// meaningless. The analytic Jacobian is the derivative of the *exact* mapping
+// -- official's compute_distort_jacobian is pure double, with no float round
+// trip -- so the exact mapping is what the finite difference has to use.
+Eigen::Vector2d predict_pixel_exact(const type::Variable& landmark, const type::Variable& anchor_clone,
+                                    const type::Variable& anchor_calib, const type::Variable& obs_clone,
+                                    const type::Variable& obs_calib, const core::CameraModel& cam) {
+    const Eigen::Vector3d p_FinG = compute_p_FinG(landmark, anchor_clone, anchor_calib);
+    const Eigen::Vector3d p_FinI = obs_clone.Rot() * (p_FinG - obs_clone.pos());
+    const Eigen::Vector3d p_FinC = obs_calib.Rot() * p_FinI + obs_calib.pos();
+    const Eigen::Vector2d n = p_FinC.head<2>() / p_FinC.z();
+
+    const double* cam_d = cam.values;
+    double r = std::sqrt(n(0) * n(0) + n(1) * n(1));
+    double r_2 = r * r;
+    double r_4 = r_2 * r_2;
+    double x1 = n(0) * (1 + cam_d[4] * r_2 + cam_d[5] * r_4) + 2 * cam_d[6] * n(0) * n(1) +
+                cam_d[7] * (r_2 + 2 * n(0) * n(0));
+    double y1 = n(1) * (1 + cam_d[4] * r_2 + cam_d[5] * r_4) + cam_d[6] * (r_2 + 2 * n(1) * n(1)) +
+                2 * cam_d[7] * n(0) * n(1);
+    return Eigen::Vector2d(cam_d[0] * x1 + cam_d[2], cam_d[1] * y1 + cam_d[3]);
+}
+
 } // namespace
 
 int main() {
@@ -166,13 +193,13 @@ int main() {
     for (int m = 0; m < 2; ++m) {
         const type::Variable& obs_clone = (m == 0) ? state.clones_IMU[0] : state.clones_IMU[1];
         const Eigen::Vector2d p0_pix =
-            predict_pixel(landmark, state.clones_IMU[0], state.calib_IMUtoCAM[0], obs_clone, state.calib_IMUtoCAM[0], cam);
+            predict_pixel_exact(landmark, state.clones_IMU[0], state.calib_IMUtoCAM[0], obs_clone, state.calib_IMUtoCAM[0], cam);
 
         // H_f columns (lambda)
         for (int col = 0; col < 3; ++col) {
             type::Variable lm2 = landmark;
             lm2.value[col] += eps;
-            const Eigen::Vector2d p1_pix = predict_pixel(lm2, state.clones_IMU[0], state.calib_IMUtoCAM[0], obs_clone,
+            const Eigen::Vector2d p1_pix = predict_pixel_exact(lm2, state.clones_IMU[0], state.calib_IMUtoCAM[0], obs_clone,
                                                           state.calib_IMUtoCAM[0], cam);
             const Eigen::Vector2d numeric = (p1_pix - p0_pix) / eps;
             const Eigen::Vector2d analytic = H_f_full.block<2, 1>(2 * m, col);
@@ -199,7 +226,7 @@ int main() {
                 if (var != &state.clones_IMU[0] && var != &obs_clone) continue;
 
                 const Eigen::Vector2d p1_pix =
-                    predict_pixel(landmark, anchor_used, state.calib_IMUtoCAM[0], obs_used, state.calib_IMUtoCAM[0], cam);
+                    predict_pixel_exact(landmark, anchor_used, state.calib_IMUtoCAM[0], obs_used, state.calib_IMUtoCAM[0], cam);
                 const Eigen::Vector2d numeric = (p1_pix - p0_pix) / eps;
                 const Eigen::Vector2d analytic = H_x_full.block<2, 1>(2 * m, col_offsets[v] + col);
                 const double err = (numeric - analytic).norm();

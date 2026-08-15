@@ -168,9 +168,13 @@ Eigen::Matrix<double, 6, 1> log_se3(const Eigen::Matrix4d& mat) {
         vec.head<3>() = w;
         vec.tail<3>() = T;
     } else {
+        // Bit-parity: official factors out WT = W*T and then forms W*WT, i.e.
+        // two matrix-VECTOR products. Writing it as W*W*T groups as (W*W)*T --
+        // a matrix-matrix product first -- which sums in a different order.
         Eigen::Matrix3d W = skew_x(w / t);
         double Tan = std::tan(0.5 * t);
-        Eigen::Vector3d u = T - (0.5 * t) * (W * T) + (1.0 - t / (2.0 * Tan)) * (W * W * T);
+        Eigen::Vector3d WT = W * T;
+        Eigen::Vector3d u = T - (0.5 * t) * WT + (1 - t / (2. * Tan)) * (W * WT);
         vec.head<3>() = w;
         vec.tail<3>() = u;
     }
@@ -185,10 +189,14 @@ Eigen::Matrix4d hat_se3(const Eigen::Matrix<double, 6, 1>& vec) {
 }
 
 Eigen::Matrix4d Inv_se3(const Eigen::Matrix4d& T) {
+    // Bit-parity: official uses DYNAMIC-size .block(0,0,3,3) and multiplies the
+    // block expression of Tinv, not a fixed-size local. Eigen dispatches
+    // fixed-size 3x3*3x1 to an unrolled kernel and dynamic-size to the general
+    // gemv path -- different accumulation order, different last bit. Do not
+    // "tidy" this back into .block<3,3>() or a Matrix3d temporary.
     Eigen::Matrix4d Tinv = Eigen::Matrix4d::Identity();
-    Eigen::Matrix3d R_t = T.block<3, 3>(0, 0).transpose();
-    Tinv.block<3, 3>(0, 0) = R_t;
-    Tinv.block<3, 1>(0, 3) = -R_t * T.block<3, 1>(0, 3);
+    Tinv.block(0, 0, 3, 3) = T.block(0, 0, 3, 3).transpose();
+    Tinv.block(0, 3, 3, 1) = -Tinv.block(0, 0, 3, 3) * T.block(0, 3, 3, 1);
     return Tinv;
 }
 

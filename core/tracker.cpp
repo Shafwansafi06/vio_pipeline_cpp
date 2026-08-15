@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -195,6 +196,9 @@ bool init_tracker(TrackerData& tracker, const TrackerOptions& options,
     tracker.cameras[1] = cameras[1];
     tracker.width = cameras[0].width;
     tracker.height = cameras[0].height;
+    // Match official's TrackBase: currid = 4 * numaruco + 1, so every tracked
+    // feature id sits above the ArUco reserve and stays marginalizable.
+    tracker.next_feature_id = 4U * (std::uint32_t)std::max(0, options.num_aruco);
     auto* bytes = static_cast<std::uint8_t*>(image_storage);
     for (int camera = 0; camera < 2; ++camera) {
         tracker.previous_images[camera] = bytes + frame_bytes * std::size_t(camera);
@@ -317,6 +321,26 @@ int track_stereo_frame(TrackerData& tracker, double timestamp,
     }
     current[0].copyTo(previous[0]);
     current[1].copyTo(previous[1]);
+
+    // Track instrumentation. Per frame: "F <ts>", then one "<cam> <id> <u> <v>"
+    // line per surviving track -- the exact analogue of official TrackKLT's
+    // `pts_last`/`ids_last` after feed_stereo. Raw distorted pixels are dumped
+    // and everything derived (lifetime, parallax, epipolar residual) is computed
+    // offline by scripts/track_lifetime.py, so DOD and official are measured by
+    // identical code with identical undistortion. Off unless VIO_TRACK_DUMP is set.
+    if (const char* dump_path = std::getenv("VIO_TRACK_DUMP")) {
+        static std::FILE* dump = std::fopen(dump_path, "w");
+        if (dump != nullptr) {
+            std::fprintf(dump, "F %.9f\n", timestamp);
+            for (int cam = 0; cam < 2; ++cam) {
+                for (int i = 0; i < tracker.previous_count[cam]; ++i) {
+                    const TrackPoint& point = tracker.previous[cam][i];
+                    std::fprintf(dump, "%d %d %.4f %.4f\n", cam, point.id, point.x, point.y);
+                }
+            }
+            std::fflush(dump);
+        }
+    }
     return observation_count;
 }
 

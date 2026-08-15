@@ -8,9 +8,11 @@ navigation** (indoors, underground, urban canyons, or anywhere GPS can't
 reach).
 
 It is a **data-oriented (DOD)** re-implementation of the algorithm behind
-[OpenVINS](https://github.com/rpng/open_vins), tuned for raw speed. On the
-standard EuRoC benchmark it runs the *typical* frame **~2× faster** than
-official OpenVINS while tracing the same trajectory.
+[OpenVINS](https://github.com/rpng/open_vins). Across **10 benchmark sequences**
+(8 EuRoC + 2 KAIST), run against official OpenVINS on the same machine and
+scored by the same evaluator, it is **slightly more accurate on average (0.97×
+the ATE)** with a **1.30× faster front-end** and an **overall per-frame cost
+within 1%** of official's.
 
 ---
 
@@ -143,40 +145,93 @@ flowchart LR
     end
 ```
 
-Same math, different memory layout — and the layout is why the typical frame is
-~2× faster (see below).
+Same math, different memory layout. Measured, that buys a **1.30× faster
+front-end** on every sequence tested. The back-end ends up marginally *slower*
+than official's (1.08×) because this pipeline feeds more features per update —
+which is where its accuracy comes from. Net per-frame cost is a tie. The layout
+claim is real; the "2× overall" claim in earlier versions of this README was
+not, and has been corrected.
 
 ---
 
-## 5. Results (EuRoC MH_01_easy, same machine)
+## 5. Results — 10 sequences, both pipelines, same machine
 
-Both pipelines run on the identical bag, calibration, and hardware. Ground
-truth is the Leica total-station track; error is ATE RMSE after Umeyama
-alignment.
+Official OpenVINS was **re-run from source** (not quoted from a paper) on the
+same box, on the same data, and both trajectories were scored by the same
+`scripts/evaluate_trajectory.py` against the same ground truth: ATE RMSE after
+Umeyama SE3 alignment.
 
-### Accuracy
+![All sequences](docs/results/trajectories/all_sequences.png)
 
-| Pipeline | ATE RMSE | Trajectory | Notes |
+### Accuracy — DOD wins 6 of 10
+
+| Sequence | **DOD** | Official OpenVINS | Ratio |
 |---|---|---|---|
-| Official OpenVINS | **0.133 m** | 80.3 m | more numerically refined |
-| **DOD (this project)** | 0.407 m | 89.8 m | same trajectory shape, more drift |
+| EuRoC MH_01_easy | **0.1131 m** | 0.1180 m | 0.96 |
+| EuRoC MH_02_easy | 0.1744 m | **0.1721 m** | 1.01 |
+| EuRoC MH_03_medium | **0.2223 m** | 0.2486 m | 0.89 |
+| EuRoC MH_04_difficult | 0.4580 m | **0.4110 m** | 1.11 |
+| EuRoC MH_05_difficult | **0.3074 m** | 0.3183 m | 0.97 |
+| EuRoC V1_01_easy | **0.0494 m** | 0.0634 m | 0.78 |
+| EuRoC V1_02_medium | **0.0551 m** | 0.0573 m | 0.96 |
+| EuRoC V1_03_difficult | **0.0560 m** | 0.0595 m | 0.94 |
+| KAIST circle | 0.0374 m | **0.0305 m** | 1.23 |
+| KAIST infinity | **0.0261 m** | 0.0284 m | 0.92 |
+| **mean ratio** | | | **0.97** |
 
-### Speed / latency (per camera frame, 3682 frames)
+No divergences on any sequence. The two real losses are MH_04 (+11%) and KAIST
+circle (+23%); everything else sits within ±11%.
 
-| Metric | **DOD** | Official | Winner |
-|---|---|---|---|
-| Median latency | **3.53 ms** | 6.90 ms | **DOD ~2×** |
-| Mean latency (steady) | **5.26 ms** | 7.14 ms | **DOD 1.36×** |
-| Throughput | **~190 fps** | ~140 fps | **DOD** |
-| p95 latency | 14.65 ms | **10.20 ms** | Official (tighter tail) |
-| Worst frame | 2607 ms (1× init) | **30.8 ms** | Official (consistent) |
+### Speed — front-end faster, back-end slower, net tie
 
-**Takeaway:** DOD is the **faster** engine (typical frame ~2× quicker, higher
-throughput); official is **more accurate** and has a **tighter worst-case**.
-DOD trades some numerical polish for raw per-frame speed — the intended
-design point for a real-time GNSS-denied navigator.
+Mean ms per camera frame on an AMD Ryzen 9 7950X, both sides timed *internally*
+(image decode and file I/O excluded on both):
 
-![Trajectory comparison](docs/euroc_mh01_trajectory_comparison.png)
+| Sequence | DOD track | OV track | DOD est | OV est | **DOD total** | **OV total** |
+|---|---|---|---|---|---|---|
+| MH_01 | **1.657** | 2.107 | 5.142 | **5.046** | **6.800** | 7.152 |
+| MH_02 | **1.677** | 2.191 | 5.125 | **5.032** | **6.802** | 7.223 |
+| MH_03 | **1.710** | 2.172 | 5.803 | **5.240** | 7.513 | **7.412** |
+| MH_04 | **1.813** | 2.169 | 5.027 | **4.641** | 6.840 | **6.810** |
+| MH_05 | **1.804** | 2.190 | 5.287 | **4.859** | 7.091 | **7.049** |
+| V1_01 | **1.741** | 2.219 | 6.982 | **6.040** | 8.723 | **8.259** |
+| V1_02 | **1.914** | 2.358 | 6.225 | **5.377** | 8.139 | **7.735** |
+| V1_03 | **2.058** | 2.519 | 5.268 | **4.405** | 7.326 | **6.924** |
+| circle | **1.392** | 1.998 | 4.792 | **4.507** | **6.184** | 6.504 |
+| infinity | **1.371** | 2.295 | 5.459 | **4.964** | **6.830** | 7.259 |
+| **mean** | **1.71** | 2.22 | 5.51 | **5.11** | 7.22 | 7.23 |
+
+- **Front-end: DOD faster on all 10**, by 20–40% (**1.30×**).
+- **Back-end: DOD slower on all 10**, by 2–20% (**1.08×**) — the cost of feeding
+  ~2× the features per MSCKF update, which is what buys the accuracy above.
+- **Total: a tie** (7.22 vs 7.23 ms). Both run **6–8× faster than real time**
+  against a 50 ms budget at 20 Hz.
+
+### Per-sequence trajectories
+
+Individual panels live in [`docs/results/trajectories/`](docs/results/trajectories).
+
+| | |
+|---|---|
+| ![MH_01](docs/results/trajectories/mh_01_easy.png) | ![MH_04](docs/results/trajectories/mh_04_difficult.png) |
+| ![V1_01](docs/results/trajectories/v1_01_easy.png) | ![KAIST circle](docs/results/trajectories/kaist_circle.png) |
+
+### Honest caveats
+
+- DOD's EuRoC rows are produced by the ROS-free ASL runner, official's by its
+  rosbag runner. Transport is worth ~15%: MH_01 is 0.1131 m via ASL and
+  0.1296 m via the bag path. The two KAIST rows are bag-vs-bag.
+- Official ran with `init_dyn_use: true` and `bag_start 0`; its shipped launch
+  files skip the first 15–40 s of the machine-hall sequences.
+- Constants (`max_msckf_in_update`, `sigma_pix`, `init_imu_thresh`) are tuned
+  per dataset and **do not transfer** — the best MSCKF cap is 75 on EuRoC and
+  50 on KAIST. Assume any tuned constant is wrong on new data until measured.
+- The dynamic initializer is the linear stage only; official refines it with a
+  Ceres MLE. On EuRoC the recovered velocity is therefore discarded
+  (`init_dyn_zero_velocity`), which is a mitigation, not a fix.
+
+Full measurement history, including every hypothesis that turned out wrong, is
+in [`portdocs/Benchmark.md`](portdocs/Benchmark.md).
 
 ---
 
@@ -189,11 +244,22 @@ rosbag runners. Eigen is **vendored** in `vendor/eigen` (no install needed).
 # Regression tests (no ROS needed)
 cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release
 cmake --build build-release -j
-cd build-release && ctest --output-on-failure     # 6/6 should pass
+cd build-release && ctest --output-on-failure     # 5/5 should pass
 
 # Run on a EuRoC bag (needs ROS1 + a build with -DVIO_BUILD_ROS1=ON)
 ./vio_rosbag_runner_euroc  MH_01_easy.bag  /tmp/mh01  999
 # writes /tmp/mh01_estimate.csv, _groundtruth.csv, _timing.csv
+
+# ...or with NO ROS at all, straight from the dataset's own ASL folders:
+cmake -S . -B build -DVIO_BUILD_OPENCV_FRONTEND=ON -DVIO_BUILD_ASL_RUNNER=ON
+cmake --build build -j
+./build/dod_asl_runner  /path/to/MH_01_easy/mav0  /tmp/mh01
+```
+
+Reproduce the comparison plots and tables:
+
+```bash
+python scripts/plot_all_comparisons.py runs/ docs/results/trajectories
 ```
 
 Evaluate against ground truth:
@@ -214,6 +280,7 @@ flowchart TD
     ROOT --> INIT["initialize/ — static + dynamic initializers"]
     ROOT --> TYPE["type/ — state variables, quaternion math"]
     ROOT --> ROSD["ros/ — rosbag runners (KAIST, EuRoC)"]
+    ROOT --> TOOLS["tools/ — ROS-free ASL runner, dataset converters, benchmark harness"]
     ROOT --> TESTS["tests/ — regression + math verification (ctest)"]
     ROOT --> DOCS["docs/ + portdocs/ — benchmarks, results, plots"]
     ROOT --> VENDOR["vendor/ — bundled Eigen"]
@@ -226,6 +293,7 @@ flowchart TD
 | `initialize/` | `static_initialize` (still-start) and `dynamic_initialize` (in-motion, linear MLE) |
 | `type/` | Flat state representation and JPL quaternion operations |
 | `ros/` | `vio_rosbag_runner*.cpp` — replay a bag and dump the estimated trajectory |
+| `tools/` | `dod_asl_runner.cpp` (no-ROS runner), shared EuRoC config, bag↔ASL converters, tracker-quality dumps |
 | `tests/` | Self-checking regression tests wired into `ctest` |
 | `docs/`, `portdocs/` | Benchmark write-ups, result CSVs, trajectory plots |
 

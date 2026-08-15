@@ -5,6 +5,7 @@
 
 #include <Eigen/Eigenvalues>
 #include <algorithm>
+#include <deque>
 #include <vector>
 
 #include <cv_bridge/cv_bridge.h>
@@ -45,12 +46,26 @@ msckf::VioManagerOptions make_kaist_options() {
     options.state_opt.do_fej = true;
     options.state_opt.integration_method = msckf::IntegrationMethod::RK4;
     options.state_opt.do_calib_camera_pose = false;
-    options.state_opt.do_calib_camera_intrinsics = true;
+    // Official's kaist config disables intrinsic calibration outright and
+    // enables timeoffset instead, both because the motion is degenerate.
+    options.state_opt.do_calib_camera_intrinsics =
+        std::getenv("VIO_CALIB_INTR") != nullptr ? std::atoi(std::getenv("VIO_CALIB_INTR")) != 0 : true;
     options.state_opt.do_calib_camera_timeoffset = false;
     options.state_opt.max_clone_size = 11;
     options.state_opt.max_slam_features = 50;
     options.state_opt.max_slam_in_update = 25;
-    options.state_opt.max_msckf_in_update = 50;
+    // NOTE: this was dead code until 2026-08-15 -- nothing read
+    // max_msckf_in_update, so this runner has always fed every MSCKF feature.
+    // Now that the cap is implemented, keep KAIST uncapped unless overridden:
+    // capping was measured to hurt here long before it was live (circle.bag
+    // 0.785 -> 1.043 m, infinity 1.070 -> 1.306 m).
+    // 50, official's own kaist value -- and NOT the 75 that EuRoC wants. The
+    // best cap is dataset-dependent, which is worth remembering before copying
+    // any tuned constant across datasets:
+    //
+    //     circle.bag, SLAM on:  uncapped 0.0650   cap 75 0.0459   cap 50 0.0374
+    options.state_opt.max_msckf_in_update =
+        std::getenv("VIO_MAX_MSCKF") != nullptr ? std::atoi(std::getenv("VIO_MAX_MSCKF")) : 50;
     // Match official OpenVINS kaist_vio: feat_rep_slam = ANCHORED_MSCKF_INVERSE_DEPTH.
     // The SLAM Jacobian (updater_slam_helper) is already computed in inverse-depth
     // params, but the landmark was stored/updated as raw xyz (GLOBAL_3D default) --
@@ -73,11 +88,13 @@ msckf::VioManagerOptions make_kaist_options() {
     options.noises.sigma_ab_2 = options.noises.sigma_ab * options.noises.sigma_ab;
     options.noises.sigma_w_2 = options.noises.sigma_w * options.noises.sigma_w;
     options.noises.sigma_wb_2 = options.noises.sigma_wb * options.noises.sigma_wb;
-    options.updater_opt.sigma_pix = 1.2;
-    options.updater_opt.sigma_pix_sq = 1.2 * 1.2;
+    const double kaist_sigma_pix =
+        std::getenv("VIO_SIGMA_PIX") != nullptr ? std::atof(std::getenv("VIO_SIGMA_PIX")) : 1.2;
+    options.updater_opt.sigma_pix = kaist_sigma_pix;
+    options.updater_opt.sigma_pix_sq = kaist_sigma_pix * kaist_sigma_pix;
     options.updater_opt.chi2_multipler = 1.0;
-    options.slam_updater_opt.sigma_pix = 1.2;
-    options.slam_updater_opt.sigma_pix_sq = 1.2 * 1.2;
+    options.slam_updater_opt.sigma_pix = kaist_sigma_pix;
+    options.slam_updater_opt.sigma_pix_sq = kaist_sigma_pix * kaist_sigma_pix;
     options.slam_updater_opt.chi2_multipler = 1.0;
     options.aruco_updater_opt = options.slam_updater_opt;
     // Triangulation thresholds set to official OpenVINS's EXACT effective
@@ -109,11 +126,31 @@ msckf::VioManagerOptions make_kaist_options() {
     // Matches upstream kaist_vio/estimator_config.yaml: try_zupt: false.
     options.enable_zupt = false;
     // Official OpenVINS uses 50 SLAM landmarks for KAIST (max_slam: 50) --
-    // persistent features that cut lap-to-lap drift. Re-enabling to match
-    // official now that the pipeline is healthy (real detector, official
-    // thresholds, wait_for_jerk init). Earlier crash was in a much buggier
-    // state.
-    options.enable_slam = true;
+    // persistent features that cut lap-to-lap drift -- and this was flipped on
+    // to match, on the reasoning that the earlier crash belonged to a buggier
+    // pipeline.
+    //
+    // MEASURED 2026-08-14: it does not hold. circle.bag with SLAM on gives
+    // ATE 39.0 m and a 264 m estimated path against 29.5 m of ground truth;
+    // with SLAM off the same build gives ATE 0.666 m and a 27.6 m path. A 60x
+    // regression, and it is what made circle.bag stop reproducing the 0.624 m
+    // recorded in Benchmark 5 -- every later investigation that used circle.bag
+    // was measuring this instead of whatever it was looking for.
+    //
+    // Back to false, which is also VioManagerOptions' default and what the
+    // parity manual documents. Re-enable only alongside the SLAM crash
+    // root-cause (parity manual, open item #4), with circle.bag re-measured.
+    // SLAM ON, matching official's kaist config (max_slam: 50). It was off
+    // here for a long time on the evidence that it cost 39 m of ATE on
+    // circle.bag -- but that was measured while this runner processed stereo
+    // pairs before the IMU spanning them had arrived. With the pair queue in
+    // place, SLAM is worth more on KAIST than on EuRoC:
+    //
+    //     circle.bag    SLAM off 0.3182 m   SLAM on 0.0650 m
+    //     infinite.bag  SLAM off 0.2369 m   SLAM on 0.0261 m
+    options.enable_slam = std::getenv("VIO_ENABLE_SLAM") != nullptr
+                              ? std::atoi(std::getenv("VIO_ENABLE_SLAM")) != 0
+                              : true;
     // Disabled: fires on ~100% of frames during a continuous slow circular
     // flight (verified via debug counter -- 0.998-1.000 hover-true rate over
     // 4758 frames), i.e. badly over-triggering. Root cause not found; the
@@ -207,6 +244,9 @@ int main(int argc, char** argv) {
     sensor_msgs::ImageConstPtr left;
     sensor_msgs::ImageConstPtr right;
     double first_timestamp = -1.0;
+    double newest_imu_time = -1.0;
+    // Stereo pairs waiting for the IMU to reach them. Never dropped.
+    std::deque<std::pair<sensor_msgs::ImageConstPtr, sensor_msgs::ImageConstPtr>> pending;
     std::uint64_t frames = 0;
     double tracking_sum = 0.0;
     double estimator_sum = 0.0;
@@ -224,6 +264,7 @@ int main(int argc, char** argv) {
             data.wm << imu->angular_velocity.x, imu->angular_velocity.y, imu->angular_velocity.z;
             data.am << imu->linear_acceleration.x, imu->linear_acceleration.y, imu->linear_acceleration.z;
             msckf::feed_measurement_imu(*vio, data);
+            newest_imu_time = std::max(newest_imu_time, data.timestamp);
         } else if (topic == kGroundTruthTopic) {
             const geometry_msgs::PoseStampedConstPtr pose = message.instantiate<geometry_msgs::PoseStamped>();
             if (pose) std::fprintf(truth, "%.9f,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f\n",
@@ -238,23 +279,42 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        if (!left || !right) continue;
-        const double delta = stamp(left) - stamp(right);
-        if (std::abs(delta) > 0.003) {
-            if (delta < 0.0) left.reset(); else right.reset();
-            continue;
+        // Form the stereo pair, then QUEUE it -- do not process it here.
+        if (left && right) {
+            const double delta = stamp(left) - stamp(right);
+            if (std::abs(delta) > 0.003) {
+                if (delta < 0.0) left.reset(); else right.reset();
+            } else {
+                pending.emplace_back(left, right);
+                left.reset();
+                right.reset();
+            }
         }
 
+        // Drain every queued pair the IMU has now passed. Bag order is RECEIVE
+        // order, so an image routinely arrives before the IMU samples spanning
+        // it, and DOD propagates with whatever is buffered -- 5 ms of IMU lag
+        // takes EuRoC MH_01 from 0.11 m to 9.2 m. Official queues camera
+        // messages for the same reason.
+        //
+        // The queue is the point. Holding the pair in `left`/`right` instead
+        // lets the next image message OVERWRITE it, silently dropping frames:
+        // that cost circle.bag 0.666 -> 60 m ATE (2456 of 3600 frames left).
+        while (!pending.empty() && stamp(pending.front().first) <= newest_imu_time) {
+            const sensor_msgs::ImageConstPtr pair_left = pending.front().first;
+            const sensor_msgs::ImageConstPtr pair_right = pending.front().second;
+            pending.pop_front();
+
         const auto total_start = std::chrono::steady_clock::now();
-        const cv_bridge::CvImageConstPtr left_cv = cv_bridge::toCvShare(left, "mono8");
-        const cv_bridge::CvImageConstPtr right_cv = cv_bridge::toCvShare(right, "mono8");
+        const cv_bridge::CvImageConstPtr left_cv = cv_bridge::toCvShare(pair_left, "mono8");
+        const cv_bridge::CvImageConstPtr right_cv = cv_bridge::toCvShare(pair_right, "mono8");
         const auto tracking_start = std::chrono::steady_clock::now();
         // Official OpenVINS's callback_stereo uses cam0's own timestamp as
 // authoritative (not an average of the stereo pair) -- matched here to
 // remove it as a variable, even though the effect is bounded (<=1.5ms,
 // non-compounding through IMU integration) since the pair is already
 // gated to within 3ms of each other above.
-const double camera_timestamp = stamp(left);
+const double camera_timestamp = stamp(pair_left);
         const int observation_count = core::track_stereo_frame(*tracker, camera_timestamp,
             left_cv->image, right_cv->image, observations, core::TRACKER_MAX_FEATURES * 2);
         const auto estimator_start = std::chrono::steady_clock::now();
@@ -382,12 +442,11 @@ const double camera_timestamp = stamp(left);
                 vio->state.timestamp, value[4], value[5], value[6], value[0], value[1],
                 value[2], value[3], vio->db.count, vio->state.num_clones);
         }
-        left.reset();
-        right.reset();
         if ((frames % 250U) == 0U) std::fprintf(stderr,
             "frames=%llu initialized=%d tracks=%d mean_track_ms=%.3f mean_estimator_ms=%.3f\n",
             static_cast<unsigned long long>(frames), int(vio->is_initialized), tracker->previous_count[0],
             tracking_sum / double(frames), estimator_sum / double(frames));
+        }
     }
 
     bag.close();

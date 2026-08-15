@@ -3,6 +3,13 @@
 
 namespace core {
 
+// Triangulation rejection accounting, defined in feature.cpp.
+extern long tri_reject_cond, tri_reject_mindist, tri_reject_maxdist, tri_reject_nan, tri_accept;
+extern long gn_reject_dist, gn_reject_baseline, gn_accept;
+extern long tri_reject_cond_meas, tri_accept_meas;
+extern long db_full_refusals;
+extern long tri_cond_hist[32], tri_accept_hist[32];
+
 struct ClonePose {
     Eigen::Matrix3d R;
     Eigen::Vector3d p;

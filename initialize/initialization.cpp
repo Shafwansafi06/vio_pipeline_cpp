@@ -445,6 +445,13 @@ bool dynamic_initialize(const InitializerOptions& config,
     double oldest_camera_time = INFINITY;
     double pose_dt_avg = config.init_window_time / (double)(config.init_dyn_num_pose + 1);
     for (int f = 0; f < (int)db.count; ++f) {
+        // Bound the linear system. state = [3 per feature, vel, gravity], so
+        // system_size grows as 3N and A is (2 * observations) x system_size --
+        // letting N follow however many features the tracker happens to supply
+        // makes this allocate and multiply unboundedly. Official keeps its
+        // initializer on a separate, bounded feature set sized by
+        // init_max_features; this is the same bound applied directly.
+        if (count_valid_features >= config.init_max_features) break;
         const core::Feature& feat = db.features[f];
         std::vector<double> times;
         for (int m = 0; m < feat.num_measurements; ++m) {
@@ -591,10 +598,97 @@ bool dynamic_initialize(const InitializerOptions& config,
     }
     if (!lambda_found) return false;
 
+    // Excitation of the window. Velocity is only observable from vision +
+    // preintegration if the platform actually accelerated: with a near-static
+    // window the least-squares solution trades velocity against feature depth
+    // almost freely, and the recovered v0 is meaningless even though the fit,
+    // the conditioning and the recovered gravity all look healthy. (Measured:
+    // MH_02 recovers 0.162 m/s against a true 0.029, and the run diverges;
+    // MH_01 recovers 0.445 against a true 0.048 and merely survives. Official
+    // does not hit this because it refines the linear solution with a Ceres
+    // MLE over the IMU residuals, which DOD does not implement.)
+    double accel_excitation = 0.0;
+    {
+        Eigen::Vector3d mean = Eigen::Vector3d::Zero();
+        int n = 0;
+        for (int k = 0; k < imu_count; ++k) {
+            if (imu_data[k].timestamp < oldest_camera_time) continue;
+            if (imu_data[k].timestamp > newest_cam_time) break;
+            mean += imu_data[k].am;
+            ++n;
+        }
+        if (n > 1) {
+            mean /= double(n);
+            double sum = 0.0;
+            for (int k = 0; k < imu_count; ++k) {
+                if (imu_data[k].timestamp < oldest_camera_time) continue;
+                if (imu_data[k].timestamp > newest_cam_time) break;
+                sum += (imu_data[k].am - mean).squaredNorm();
+            }
+            accel_excitation = std::sqrt(sum / double(n));
+        }
+    }
+
     Eigen::VectorXd state_grav = (D - lambda_min * I_dd).llt().solve(I_dd) * dd;
     Eigen::VectorXd state_feat_vel = -A1A1_inv * A1.transpose() * A2 * state_grav + A1A1_inv * A1.transpose() * b;
     Eigen::Vector3d v_I0inI0 = state_feat_vel.segment<3>(size_feature * num_features + 0);
+
     Eigen::Vector3d gravity_inI0 = state_grav;
+
+    // How well does the recovered state actually explain the measurements?
+    {
+        Eigen::VectorXd solution(A.cols());
+        solution.head(A1.cols()) = state_feat_vel;
+        solution.tail(3) = state_grav;
+        const double b_norm = b.norm();
+        const double relative_residual = b_norm > 1e-12 ? (A * solution - b).norm() / b_norm : 0.0;
+        // Physical cross-check: over a short window with modest acceleration the
+        // mean specific force is dominated by gravity, so the recovered gravity
+        // direction should sit close to -mean(am). A linear solve that latched
+        // onto the wrong root gets this badly wrong even when it satisfies the
+        // |g| constraint and explains the pixels.
+        Eigen::Vector3d mean_am = Eigen::Vector3d::Zero();
+        int used = 0;
+        for (int k = 0; k < imu_count; ++k) {
+            if (imu_data[k].timestamp < oldest_camera_time) continue;
+            if (imu_data[k].timestamp > newest_cam_time) break;
+            mean_am += imu_data[k].am;
+            ++used;
+        }
+        double gravity_angle_deg = 0.0;
+        if (used > 0 && state_grav.norm() > 1e-9) {
+            mean_am /= double(used);
+            const double cosine = mean_am.normalized().dot((-state_grav).normalized());
+            gravity_angle_deg = 180.0 / M_PI * std::acos(std::max(-1.0, std::min(1.0, cosine)));
+        }
+        // Conditioning of the linear system. An under-constrained window (too
+        // little parallax) still fits its own measurements -- the residual
+        // stays small because the solution is not unique, not because it is
+        // right. Official guards this with init_dyn_min_rec_cond; DOD checked
+        // nothing but the companion matrix's rank.
+        Eigen::JacobiSVD<Eigen::MatrixXd> svd_A(A);
+        const double smax = svd_A.singularValues()(0);
+        const double smin = svd_A.singularValues()(svd_A.singularValues().size() - 1);
+        const double rec_cond = smax > 0.0 ? smin / smax : 0.0;
+        std::cout << "[init-d]: rec_cond " << rec_cond << " excitation " << accel_excitation;
+        if (rec_cond < config.init_dyn_min_rec_cond) {
+            std::cout << " -- rejected (below " << config.init_dyn_min_rec_cond << ")\n";
+            return false;
+        }
+        std::cout << "[init-d]: linear residual " << relative_residual
+                  << " gravity-vs-accel " << gravity_angle_deg << " deg"
+                  << " |v0| " << state_feat_vel.segment<3>(size_feature * num_features + 0).norm() << "\n";
+        if (gravity_angle_deg > config.init_dyn_max_gravity_deg) {
+            std::cout << "[init-d]: rejected, gravity " << gravity_angle_deg
+                      << " deg from measured specific force\n";
+            return false;
+        }
+        if (relative_residual > config.init_dyn_max_residual) {
+            std::cout << "[init-d]: rejected, residual " << relative_residual
+                      << " > " << config.init_dyn_max_residual << "\n";
+            return false;
+        }
+    }
 
     if (std::abs(gravity_inI0.norm() - config.gravity_mag) > 1e-3) {
         std::cout << "[init-d]: gravity did not converge (|g|=" << gravity_inI0.norm() << ")\n";
@@ -614,6 +708,16 @@ bool dynamic_initialize(const InitializerOptions& config,
     Eigen::Vector4d q_GtoIk = type::quat_multiply(q_I0toIk, q_GtoI0);
     Eigen::Vector3d p_IkinG = R_GtoI0.transpose() * p_IkinI0;
     Eigen::Vector3d v_IkinG = R_GtoI0.transpose() * v_IkinI0;
+    if (config.init_dyn_zero_velocity || accel_excitation < config.init_dyn_min_excitation) {
+        // Discard the velocity the linear stage could not observe, keeping the
+        // gravity alignment and pose it did recover. This zeroes the velocity
+        // actually handed to the filter -- zeroing v_I0inI0 instead does NOT
+        // work, because the CPI chain rebuilds v_Ik from it and the window's
+        // own delta-v survives (measured: MH_02 still diverged at 4.1e4).
+        std::cout << "[init-d]: discarding unobservable velocity (was "
+                  << v_IkinG.norm() << " m/s, window excitation " << accel_excitation << ")\n";
+        v_IkinG.setZero();
+    }
 
     std::cout << "[init-d]: dynamic init OK  |g|=" << gravity_inI0.norm()
               << " |v0|=" << v_I0inI0.norm() << " feats=" << count_valid_features
@@ -630,7 +734,15 @@ bool dynamic_initialize(const InitializerOptions& config,
     type::init_imu(t_imu);
     t_imu.id = original_id;
     type::set_variable_value(t_imu, imu_state);
-    type::set_variable_fej(t_imu, imu_state);
+    // FEJ deliberately keeps the SOLVED velocity even when the state velocity
+    // above was discarded. Zeroing both diverges on MH_02 (3.4e4 m) while
+    // zeroing only the value gives 0.1744 m -- the Jacobians are evidently
+    // better conditioned around the solve's own linearisation point than around
+    // a velocity the solve never produced. This asymmetry is empirical and is
+    // the sort of thing official's MLE refinement would make unnecessary.
+    Eigen::Matrix<double, 16, 1> fej_state = imu_state;
+    fej_state.segment<3>(7) = R_GtoI0.transpose() * v_IkinI0;
+    type::set_variable_fej(t_imu, fej_state);
 
     // Prior covariance: dynamic init is less certain than a still start, so
     // velocity gets a looser prior. (Official inflates the MLE information
@@ -639,6 +751,14 @@ bool dynamic_initialize(const InitializerOptions& config,
     covariance.block<3, 3>(3, 3) = (0.05 * 0.05) * Eigen::Matrix3d::Identity();  // position
     covariance.block<3, 3>(6, 6) = (0.05 * 0.05) * Eigen::Matrix3d::Identity();  // velocity
     covariance.block<3, 3>(12, 12) = (0.05 * 0.05) * Eigen::Matrix3d::Identity(); // accel bias
+    // Official's inflation factors, applied for the same reason it applies
+    // them: the recovered state is a starting guess, and a prior that claims
+    // more confidence than the solve deserves leaves the filter unable to
+    // correct the error it started with.
+    covariance.block<3, 3>(0, 0) *= config.init_dyn_inflation_ori;
+    covariance.block<3, 3>(6, 6) *= config.init_dyn_inflation_vel;
+    covariance.block<3, 3>(9, 9) *= config.init_dyn_inflation_bg;
+    covariance.block<3, 3>(12, 12) *= config.init_dyn_inflation_ba;
 
     timestamp = newest_cam_time;
     return true;

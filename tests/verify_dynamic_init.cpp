@@ -101,7 +101,14 @@ int main() {
     // ---- Configure + run the dynamic initializer ----
     initialize::InitializerOptions cfg;
     cfg.init_window_time = 1.0;
-    cfg.init_max_features = 8;
+    // Must match the number of features this test actually synthesises (16).
+    // In official, init_max_features is how many features the initialisation
+    // tracker extracts, i.e. roughly the size of the init database -- the
+    // solver then uses all of them. dynamic_initialize() now bounds its linear
+    // system by this value (3N+6 states, previously unbounded, which segfaulted
+    // once a richer frontend filled the database), so setting it to half the
+    // supplied features silently solved with half the data.
+    cfg.init_max_features = 16;
     cfg.gravity_mag = g_mag;
     cfg.init_calib_camImu_dt = 0.0;
     cfg.init_dyn_use = true;

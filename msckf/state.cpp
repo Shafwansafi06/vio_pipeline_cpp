@@ -5,6 +5,14 @@ namespace msckf {
 
 void init_state(State& state, const StateOptions& options) {
     state.options = options;
+    // features_SLAM and clones_IMU are fixed-capacity. A config asking for more
+    // than fits used to run straight off the end of the array (max_slam = 100
+    // segfaults mid-sequence); clamp instead so an over-large config costs
+    // landmarks, not memory corruption.
+    const int slam_capacity = int(sizeof(state.features_SLAM) / sizeof(state.features_SLAM[0]));
+    const int clone_capacity = int(sizeof(state.clones_IMU) / sizeof(state.clones_IMU[0]));
+    if (state.options.max_slam_features > slam_capacity) state.options.max_slam_features = slam_capacity;
+    if (state.options.max_clone_size > clone_capacity) state.options.max_clone_size = clone_capacity;
     state.num_variables = 0;
     state.num_clones = 0;
     state.num_slam_features = 0;

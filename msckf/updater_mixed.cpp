@@ -12,12 +12,28 @@ namespace msckf {
 // which introduces an extra Jacobian coupling to the anchor clone (H_anc) that
 // the plain GLOBAL_3D representation lacks. This better conditions low-parallax
 // / degenerate-motion features (e.g. KAIST circle.bag) exactly as official does.
+// PARITY NOTE (verified by tests/bitdiff_jac.cpp): for MONO features this
+// function is bit-exact against official's UpdaterHelper::get_feature_jacobian_full
+// -- res, H_f and H_x all at 0 ULP. For STEREO features the two differ by a
+// permutation of rows and of Hx_order columns, because official iterates a
+// feature's per-camera lists through an unordered_map (camera 1 first under
+// libstdc++) while this walks measurements in insertion order. Permuting rows
+// and the matching columns leaves the EKF update mathematically unchanged, so
+// this is a bit-parity gap, not an accuracy one. Reordering the loops to match
+// was tried and did not close it (the column order follows a separate path),
+// so the simpler loop is kept and the difference is documented instead.
+
 void get_feature_jacobian_mixed(const State& state, const core::Feature& feature,
                                 const core::CameraModel* camera_models,
                                 Eigen::MatrixXd& H_f, Eigen::MatrixXd& H_x,
                                 Eigen::VectorXd& residual,
-                                type::Variable** Hx_order, int& num_Hx) {
+                                type::Variable** Hx_order, int& num_Hx,
+                                type::LandmarkRepresentation representation) {
     num_Hx = 0;
+    // GLOBAL_3D keeps the feature in global XYZ: no anchor variable, no
+    // representation chain, no anchor-clone coupling -- official's default for
+    // MSCKF features.
+    const bool want_anchored = representation != type::LandmarkRepresentation::GLOBAL_3D;
     auto add_variable = [&](type::Variable* variable) {
         for (int i = 0; i < num_Hx; ++i) {
             if (Hx_order[i] == variable) return;
@@ -51,8 +67,8 @@ void get_feature_jacobian_mixed(const State& state, const core::Feature& feature
     }
     // Anchored representation: the anchor clone (and its extrinsics) must be in
     // the Jacobian even if the anchor timestamp is not itself a measurement.
-    if (anchor_clone) add_variable(anchor_clone);
-    if (acam >= 0 && state.options.do_calib_camera_pose)
+    if (want_anchored && anchor_clone) add_variable(anchor_clone);
+    if (want_anchored && acam >= 0 && state.options.do_calib_camera_pose)
         add_variable(const_cast<type::Variable*>(&state.calib_IMUtoCAM[acam]));
 
     int column_offsets[100];
@@ -72,7 +88,7 @@ void get_feature_jacobian_mixed(const State& state, const core::Feature& feature
     Eigen::Matrix3d dpfg_dlambda = Eigen::Matrix3d::Identity();
     Eigen::Matrix<double, 3, 6> H_anc = Eigen::Matrix<double, 3, 6>::Zero();
     Eigen::Vector3d p_FinG = feature.p_FinG;
-    bool anchored = (anchor_clone != nullptr && acam >= 0);
+    bool anchored = want_anchored && (anchor_clone != nullptr && acam >= 0);
     if (anchored) {
         const type::Variable& acalib = state.calib_IMUtoCAM[acam];
         const Eigen::Matrix3d R_ItoC_a = acalib.Rot();

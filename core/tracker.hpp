@@ -19,6 +19,15 @@ struct TrackerOptions {
     int grid_y = 5;
     int min_px_dist = 15;
     int histogram_method = 1; // 0 none, 1 equalize, 2 CLAHE
+    // Feature ids must start above the ArUco tag reserve. Official does
+    // `currid = 4 * numaruco + 1` in TrackBase, and StateHelper::marginalize_slam
+    // refuses to marginalize any landmark whose id is <= 4 * max_aruco_features
+    // (the low ids belong to tags, which are never dropped). Starting at 1
+    // meant DOD's first ~4096 features were permanently unmarginalizable: the
+    // first 50 SLAM landmarks got promoted early with low ids and could never
+    // be retired, so the landmark slots were occupied forever by tracks that
+    // had long since died.
+    int num_aruco = 1024;
     int pyramid_levels = 5;
     int window_size = 15;
     bool stereo = true;

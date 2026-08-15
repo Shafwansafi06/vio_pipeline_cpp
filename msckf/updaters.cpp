@@ -2,6 +2,7 @@
 #include "state_helper.hpp"
 #include "updater_mixed.hpp"
 #include "updater_slam_helper.hpp"
+#include "chi2_table.hpp"
 #include "../type/quat_ops.hpp"
 #include <Eigen/Dense>
 #include <iostream>
@@ -25,13 +26,29 @@ static core::ClonesCamera build_clones_camera(const State& state) {
     return clones_cam;
 }
 
+// Chi-squared 0.95 gate. Official precomputes dof 1..499 with
+// boost::math::quantile at construction (UpdaterMSCKF.cpp:52-55); we embed the
+// identical values as hex-float literals so no boost dependency leaks into this
+// library and the threshold is bit-identical rather than merely close.
+//
+// This replaced a Wilson-Hilferty approximation plus 3-decimal constants, which
+// was wrong in the 4th decimal at every dof (dof=1: 3.841 vs 3.8414588...) and
+// so accepted/rejected a different set of features than official does.
+// Anchor-change failure accounting. change_anchors() runs whenever a
+// landmark's anchor clone is about to be marginalized; each of these paths
+// silently kills the landmark, so they need to be visible.
+long anchor_marg_no_old = 0;
+long anchor_marg_depth = 0;
+long anchor_marg_transform = 0;
+long anchor_change_ok = 0;
+long dinit_seen = 0, dinit_skip_cap = 0, dinit_skip_meas = 0, dinit_skip_tri = 0, dinit_ok = 0;
+
 static double chi2_ppf_95(int dof) {
     if (dof <= 0) return 0.0;
-    if (dof == 1) return 3.841;
-    if (dof == 2) return 5.991;
-    if (dof == 3) return 7.815;
-    if (dof == 4) return 9.488;
-    if (dof == 5) return 11.070;
+    if (dof < CHI2_TABLE_SIZE) return CHI2_TABLE_95[dof];
+    // ponytail: dof >= 500 is unreachable here -- residual rows are bounded by
+    // 4 * max_clone_size (~44). Official calls boost at runtime for this case;
+    // if the clone window ever grows past 125, regenerate the table instead.
     double k = static_cast<double>(dof);
     double term = 1.0 - 2.0 / (9.0 * k);
     double sd = std::sqrt(2.0 / (9.0 * k));
@@ -39,30 +56,45 @@ static double chi2_ppf_95(int dof) {
     return k * std::pow(term + z * sd, 3.0);
 }
 
-void nullspace_project_inplace(const Eigen::MatrixXd& H_f, Eigen::MatrixXd& H_x, Eigen::VectorXd& res) {
-    Eigen::HouseholderQR<Eigen::MatrixXd> qr(H_f);
-    Eigen::MatrixXd Q = qr.householderQ();
-    int rows = H_f.rows();
-    if (rows > 3) {
-        Eigen::MatrixXd Q_n = Q.rightCols(rows - 3);
-        H_x = Q_n.transpose() * H_x;
-        res = Q_n.transpose() * res;
-    } else {
-        H_x.resize(0, H_x.cols());
-        res.resize(0);
+void nullspace_project_inplace(Eigen::MatrixXd& H_f, Eigen::MatrixXd& H_x, Eigen::VectorXd& res) {
+    // Official does this with in-place GIVENS rotations, never forming Q.
+    // This used to be a HouseholderQR with an explicit Q and a rightCols()
+    // slice. Both are mathematically valid left-nullspace projections, but they
+    // produce DIFFERENT orthonormal bases -- so H_x and res come out different
+    // (not merely off in the last bits), and every downstream chi2 gate and EKF
+    // update sees different numbers. Verified against the oracle by
+    // bitdiff_update.
+    Eigen::JacobiRotation<double> tempHo_GR;
+    for (int n = 0; n < H_f.cols(); ++n) {
+        for (int m = (int)H_f.rows() - 1; m > n; m--) {
+            tempHo_GR.makeGivens(H_f(m - 1, n), H_f(m, n));
+            (H_f.block(m - 1, n, 2, H_f.cols() - n)).applyOnTheLeft(0, 1, tempHo_GR.adjoint());
+            (H_x.block(m - 1, 0, 2, H_x.cols())).applyOnTheLeft(0, 1, tempHo_GR.adjoint());
+            (res.block(m - 1, 0, 2, 1)).applyOnTheLeft(0, 1, tempHo_GR.adjoint());
+        }
     }
+    H_x = H_x.block(H_f.cols(), 0, H_x.rows() - H_f.cols(), H_x.cols()).eval();
+    res = res.block(H_f.cols(), 0, res.rows() - H_f.cols(), res.cols()).eval();
 }
 
-void measurement_compress_inplace(const Eigen::MatrixXd& H_x, const Eigen::VectorXd& res,
-                                  Eigen::MatrixXd& H_x_comp, Eigen::VectorXd& res_comp) {
-    Eigen::HouseholderQR<Eigen::MatrixXd> qr(H_x);
-    Eigen::MatrixXd R = qr.matrixQR().triangularView<Eigen::Upper>();
-    int k = std::min(H_x.rows(), H_x.cols());
-    H_x_comp = R.topRows(k);
-    
-    Eigen::MatrixXd Q = qr.householderQ();
-    Eigen::MatrixXd Q_thin = Q.leftCols(k);
-    res_comp = Q_thin.transpose() * res;
+void measurement_compress_inplace(Eigen::MatrixXd& H_x, Eigen::VectorXd& res) {
+    // Same story: official compresses in place with Givens rotations and then
+    // conservativeResize()s down to rank rows, rather than building R and Q
+    // from a HouseholderQR. Note the early return when the system is already
+    // thin -- official leaves such a system untouched.
+    if (H_x.rows() <= H_x.cols())
+        return;
+    Eigen::JacobiRotation<double> tempHo_GR;
+    for (int n = 0; n < H_x.cols(); n++) {
+        for (int m = (int)H_x.rows() - 1; m > n; m--) {
+            tempHo_GR.makeGivens(H_x(m - 1, n), H_x(m, n));
+            (H_x.block(m - 1, n, 2, H_x.cols() - n)).applyOnTheLeft(0, 1, tempHo_GR.adjoint());
+            (res.block(m - 1, 0, 2, 1)).applyOnTheLeft(0, 1, tempHo_GR.adjoint());
+        }
+    }
+    int r = std::min(H_x.rows(), H_x.cols());
+    H_x.conservativeResize(r, H_x.cols());
+    res.conservativeResize(r, res.cols());
 }
 
 void get_feature_jacobian_full(const State& state, const core::Feature& feature,
@@ -288,7 +320,8 @@ void update_msckf(UpdaterMSCKFData& updater, State& state, core::Feature** featu
         type::Variable* Hx_order[100];
         int num_Hx = 0;
         
-        get_feature_jacobian_mixed(state, *feat, cam_models, H_f, H_x, res, Hx_order, num_Hx);
+        get_feature_jacobian_mixed(state, *feat, cam_models, H_f, H_x, res, Hx_order, num_Hx,
+                                   state.options.feat_rep_msckf);
         nullspace_project_inplace(H_f, H_x, res);
         
         if (H_x.rows() == 0 || res.size() == 0) {
@@ -379,14 +412,12 @@ void update_msckf(UpdaterMSCKFData& updater, State& state, core::Feature** featu
     Eigen::MatrixXd Hx_valid = Hx_big.topLeftCorner(total_rows, current_col_big);
     Eigen::VectorXd res_valid = res_big.head(total_rows);
     
-    Eigen::MatrixXd Hx_comp;
-    Eigen::VectorXd res_comp;
-    measurement_compress_inplace(Hx_valid, res_valid, Hx_comp, res_comp);
-    
-    if (Hx_comp.rows() < updater.options.min_update_rows) return;
-    
-    Eigen::MatrixXd R_big = updater.options.sigma_pix_sq * Eigen::MatrixXd::Identity(res_comp.size(), res_comp.size());
-    EKFUpdate(state, hx_order_big, num_hx_order_big, Hx_comp, res_comp, R_big);
+    measurement_compress_inplace(Hx_valid, res_valid);
+
+    if (Hx_valid.rows() < updater.options.min_update_rows) return;
+
+    Eigen::MatrixXd R_big = updater.options.sigma_pix_sq * Eigen::MatrixXd::Identity(res_valid.size(), res_valid.size());
+    EKFUpdate(state, hx_order_big, num_hx_order_big, Hx_valid, res_valid, R_big);
 }
 
 void init_updater_slam(UpdaterSLAMData& updater, const UpdaterOptions& options_slam, const UpdaterOptions& options_aruco,
@@ -409,14 +440,15 @@ void delayed_init_slam(UpdaterSLAMData& updater, State& state, core::Feature** f
         core::Feature* feat = feature_vec[i];
         feat->to_delete = true; // consumed either way, matching the reference implementation
 
-        if (state.num_slam_features >= state.options.max_slam_features) continue;
+        ++dinit_seen;
+        if (state.num_slam_features >= state.options.max_slam_features) { ++dinit_skip_cap; continue; }
 
         core::clean_old_measurements(*feat, clonetimes, state.num_clones);
-        if (feat->num_measurements < 2) continue;
+        if (feat->num_measurements < 2) { ++dinit_skip_meas; continue; }
 
         const bool success_tri = core::single_triangulation(*feat, clones_cam, updater.feat_init_options);
         const bool success_refine = success_tri && core::single_gaussnewton(*feat, clones_cam, updater.feat_init_options);
-        if (!success_tri || !success_refine) continue;
+        if (!success_tri || !success_refine) { ++dinit_skip_tri; continue; }
 
         // Stage the candidate directly in its future state slot so
         // get_feature_jacobian_slam()/initialize() reference a stable
@@ -443,6 +475,7 @@ void delayed_init_slam(UpdaterSLAMData& updater, State& state, core::Feature** f
         const Eigen::MatrixXd R = updater.options_slam.sigma_pix_sq * Eigen::MatrixXd::Identity(res.size(), res.size());
         if (initialize(state, &candidate, Hx_order, num_Hx, H_x, H_f, R, res, updater.options_slam.chi2_multipler)) {
             state.num_slam_features++;
+            ++dinit_ok;
         }
     }
 }
@@ -483,12 +516,33 @@ void update_slam(UpdaterSLAMData& updater, State& state, core::Feature** feature
         core::clean_old_measurements(*feat, clonetimes, state.num_clones);
         if (feat->num_measurements < 1) continue;
 
+        // Build the Jacobian through the SAME function official uses --
+        // get_feature_jacobian_full, whose DOD equivalent is
+        // get_feature_jacobian_mixed and is proven bit-exact against it by
+        // tests/bitdiff_jac.cpp for both GLOBAL_3D and the anchored
+        // inverse-depth representation this actually runs.
+        //
+        // This replaced get_feature_jacobian_slam(), a separate hand-written
+        // implementation with its own variable ordering (anchor clone pushed
+        // first rather than in measurement order), its own column layout and
+        // its own residual assembly. Official has no such function: it copies
+        // the landmark's anchor and position into the feature, calls
+        // get_feature_jacobian_full, and appends H_f as extra columns -- which
+        // is exactly what happens below. Keeping a bespoke second
+        // implementation of an already-verified function was the last place an
+        // unverified divergence could hide.
+        core::Feature feat_slam = *feat;
+        feat_slam.anchor_cam_id = landmark->anchor_cam_id;
+        feat_slam.anchor_clone_timestamp = landmark->timestamp; // repurposed: anchor clone ts
+        feat_slam.p_FinA = type::get_landmark_xyz(*landmark, false);
+
         Eigen::MatrixXd H_f, H_x;
         Eigen::VectorXd res;
         type::Variable* Hx_order[100];
         int num_Hx = 0;
-        if (!get_feature_jacobian_slam(state, *landmark, *feat, cam_models, H_f, H_x, res, Hx_order, num_Hx) ||
-            res.size() == 0) {
+        get_feature_jacobian_mixed(state, feat_slam, cam_models, H_f, H_x, res, Hx_order, num_Hx,
+                                   state.options.feat_rep_slam);
+        if (res.size() == 0 || num_Hx == 0) {
             landmark->update_fail_count++;
             continue;
         }
@@ -502,15 +556,13 @@ void update_slam(UpdaterSLAMData& updater, State& state, core::Feature** feature
         Eigen::MatrixXd H_xf(H_x.rows(), H_x.cols() + H_f.cols());
         H_xf << H_x, H_f;
 
+        // Official: S = H_xf P H_xf^T, S.diagonal() += sigma_pix_sq, then
+        // res.dot(S.llt().solve(res)). No symmetrisation, and an LLT rather
+        // than an LDLT -- both were additions here.
         Eigen::MatrixXd P_marg = get_marginal_covariance(state, Hxf_order, num_Hxf);
         Eigen::MatrixXd S = H_xf * P_marg * H_xf.transpose();
-        const double sigma_sq = updater.options_slam.sigma_pix_sq;
-        for (int r = 0; r < S.rows(); ++r) S(r, r) += sigma_sq;
-        S = 0.5 * (S + S.transpose());
-
-        double chi2 = 99999.0;
-        Eigen::LDLT<Eigen::MatrixXd> solver(S);
-        if (solver.info() == Eigen::Success) chi2 = res.dot(solver.solve(res));
+        S.diagonal() += updater.options_slam.sigma_pix_sq * Eigen::VectorXd::Ones(S.rows());
+        double chi2 = res.dot(S.llt().solve(res));
         const double chi2_check = chi2_ppf_95(static_cast<int>(res.size()));
         if (chi2 > updater.options_slam.chi2_multipler * chi2_check) {
             landmark->update_fail_count++;
@@ -565,7 +617,8 @@ void perform_anchor_change(State& state, type::Variable& landmark, double new_an
     Eigen::Matrix<double, 3, 6> H_x_old_anchor;
     type::Variable* old_anchor_clone = nullptr;
     if (!get_feature_jacobian_representation(state, landmark, H_f_old, H_x_old_anchor, old_anchor_clone)) {
-        landmark.should_marg = true; // old anchor already gone; drop next frame
+        ++anchor_marg_no_old; // old anchor already gone; drop next frame
+        landmark.should_marg = true;
         return;
     }
     const Eigen::Vector3d p_FinA_old = type::get_landmark_xyz(landmark, false);
@@ -597,6 +650,7 @@ void perform_anchor_change(State& state, type::Variable& landmark, double new_an
     // (should_marg via the caller's failure handling) is safer than
     // corrupting the whole filter's covariance.
     if (!(p_FinA_new.z() > 0.05 && p_FinA_new.z() < 100.0)) {
+        ++anchor_marg_depth;
         landmark.should_marg = true;
         return;
     }
@@ -621,6 +675,7 @@ void perform_anchor_change(State& state, type::Variable& landmark, double new_an
         landmark.anchor_cam_id = old_anchor_cam_id;
         landmark.timestamp = old_timestamp;
         type::set_landmark_from_xyz(landmark, p_FinA_old, false);
+        ++anchor_marg_transform;
         landmark.should_marg = true;
         return;
     }
@@ -664,7 +719,9 @@ void change_anchors(UpdaterSLAMData& updater, State& state) {
             continue;
         }
         if (landmark.timestamp == marg_time) {
+            const bool was_marg = landmark.should_marg;
             perform_anchor_change(state, landmark, state.timestamp, landmark.anchor_cam_id);
+            if (!was_marg && !landmark.should_marg) ++anchor_change_ok;
         }
     }
 }
@@ -748,13 +805,11 @@ bool try_update_zupt(UpdaterZeroVelocityData& updater, State& state, double time
     Eigen::MatrixXd H_valid = H.topRows(actual_rows);
     Eigen::VectorXd res_valid = res.head(actual_rows);
     
-    Eigen::MatrixXd H_comp;
-    Eigen::VectorXd res_comp;
-    measurement_compress_inplace(H_valid, res_valid, H_comp, res_comp);
-    
-    if (H_comp.rows() < 1) return false;
-    
-    Eigen::MatrixXd R = updater.zupt_noise_multiplier * Eigen::MatrixXd::Identity(res_comp.size(), res_comp.size());
+    measurement_compress_inplace(H_valid, res_valid);
+
+    if (H_valid.rows() < 1) return false;
+
+    Eigen::MatrixXd R = updater.zupt_noise_multiplier * Eigen::MatrixXd::Identity(res_valid.size(), res_valid.size());
     
     Eigen::Matrix<double, 6, 6> Q_bias = Eigen::Matrix<double, 6, 6>::Identity();
     Q_bias.block<3, 3>(0, 0) *= dt_summed * updater.noises.sigma_wb_2;
@@ -782,10 +837,10 @@ bool try_update_zupt(UpdaterZeroVelocityData& updater, State& state, double time
     // 9:12 -> H.block(0, 3) (bg)
     // 12:15 -> H.block(0, 6) (ba).
     // This is a beautiful and critical correction!
-    Eigen::MatrixXd H_full = Eigen::MatrixXd::Zero(res_comp.size(), 15);
-    H_full.leftCols<3>() = H_comp.leftCols<3>();
-    H_full.block(0, 9, H_comp.rows(), 3) = H_comp.block(0, 3, H_comp.rows(), 3);
-    H_full.block(0, 12, H_comp.rows(), 3) = H_comp.block(0, 6, H_comp.rows(), 3);
+    Eigen::MatrixXd H_full = Eigen::MatrixXd::Zero(res_valid.size(), 15);
+    H_full.leftCols<3>() = H_valid.leftCols<3>();
+    H_full.block(0, 9, H_valid.rows(), 3) = H_valid.block(0, 3, H_valid.rows(), 3);
+    H_full.block(0, 12, H_valid.rows(), 3) = H_valid.block(0, 6, H_valid.rows(), 3);
     
     type::Variable* Hx_order_full[1] = { &state.imu };
     Eigen::MatrixXd P_marg = get_marginal_covariance(state, Hx_order_full, 1);
@@ -797,10 +852,10 @@ bool try_update_zupt(UpdaterZeroVelocityData& updater, State& state, double time
     double chi2 = 99999.0;
     Eigen::LDLT<Eigen::MatrixXd> solver(S);
     if (solver.info() == Eigen::Success) {
-        chi2 = res_comp.dot(solver.solve(res_comp));
+        chi2 = res_valid.dot(solver.solve(res_valid));
     }
     
-    double chi2_check = chi2_ppf_95(res_comp.size());
+    double chi2_check = chi2_ppf_95(res_valid.size());
     double vel_norm = state.imu.vel().norm();
     
     // Check disparity
@@ -830,7 +885,7 @@ bool try_update_zupt(UpdaterZeroVelocityData& updater, State& state, double time
     state.Cov.block<3, 3>(bg_cov_idx, bg_cov_idx) += Q_bias.block<3, 3>(0, 0);
     state.Cov.block<3, 3>(ba_cov_idx, ba_cov_idx) += Q_bias.block<3, 3>(3, 3);
     
-    EKFUpdate(state, Hx_order_full, 1, H_full, res_comp, R);
+    EKFUpdate(state, Hx_order_full, 1, H_full, res_valid, R);
     state.timestamp = timestamp;
     return true;
 }

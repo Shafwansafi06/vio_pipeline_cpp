@@ -46,15 +46,18 @@ bool get_feature_jacobian_representation(const State& state, const type::Variabl
     H_anchor_clone.block<3, 3>(0, 0) = -R_GtoI.transpose() * type::skew_x(term);
     H_anchor_clone.block<3, 3>(0, 3) = Eigen::Matrix3d::Identity();
 
+    // Transcribed from official's ANCHORED_MSCKF_INVERSE_DEPTH branch. The
+    // off-diagonal terms are `-(1.0 / (rho * rho)) * alpha` -- a reciprocal
+    // formed first and then multiplied -- NOT `-alpha / (rho * rho)`. The two
+    // differ in the last bits, and this Jacobian is applied to every SLAM
+    // landmark on every frame, which is the dominant update path now that the
+    // landmark lifecycle actually runs.
     const double alpha = p_FinA[0] / p_FinA[2];
     const double beta = p_FinA[1] / p_FinA[2];
-    const double rho = 1.0 / p_FinA[2];
-    Eigen::Matrix3d d_pfinA_dpinv = Eigen::Matrix3d::Zero();
-    d_pfinA_dpinv(0, 0) = 1.0 / rho;
-    d_pfinA_dpinv(0, 2) = -alpha / (rho * rho);
-    d_pfinA_dpinv(1, 1) = 1.0 / rho;
-    d_pfinA_dpinv(1, 2) = -beta / (rho * rho);
-    d_pfinA_dpinv(2, 2) = -1.0 / (rho * rho);
+    const double rho = 1 / p_FinA[2];
+    Eigen::Matrix<double, 3, 3> d_pfinA_dpinv;
+    d_pfinA_dpinv << (1.0 / rho), 0.0, -(1.0 / (rho * rho)) * alpha, 0.0, (1.0 / rho), -(1.0 / (rho * rho)) * beta, 0.0, 0.0,
+        -(1.0 / (rho * rho));
 
     H_f = R_CtoG * d_pfinA_dpinv;
     return true;
