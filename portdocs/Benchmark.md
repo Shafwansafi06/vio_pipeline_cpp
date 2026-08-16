@@ -1794,3 +1794,59 @@ average, having been a tie. KAIST: circle 6.18 -> 5.33 ms, infinity 6.83 ->
 The MSCKF stage is still ~2x official's (1.390 vs 0.719) with the remaining
 cost in measurement compression (0.437) and the per-feature chi2 gate (0.319);
 those are the next targets if this needs to go further.
+
+---
+
+## Benchmark 13 — compression and chi2 gate (2026-08-16)
+
+Continued from Benchmark 12, same method: profile, fix the expression, verify
+the ATE does not move.
+
+| | before | after |
+|---|---|---|
+| measurement compression | 0.437 | **0.160** |
+| `S = HPH^T + R` (in EKFUpdate) | 0.637 | **0.432** |
+| chi2 gate | 0.322 | **0.273** |
+| assembly buffer alloc | 0.071 | **0.023** |
+| **MSCKF stage** | 1.535 | **1.000** |
+| **SLAM stage** | 2.684 | **1.761** |
+
+**Compression**: official sweeps the system with ~23k individual Givens
+rotations, each a separate 2 x (cols - n) Eigen call. The EKF update is
+invariant to left-multiplication by an orthogonal matrix -- that invariance is
+the entire premise of the compression -- so one blocked Householder QR of the
+augmented `[H | res]` produces the same R without ever forming Q. Augmenting
+res as the last column is what avoids Q.
+
+**S in EKFUpdate**: it re-gathered the marginal covariance, when the rows of
+`M_a` belonging to the measurement variables already *are* `P_small * H^T`.
+
+**chi2 gate**: the gather itself is fine; its per-feature 83x83 allocation was
+not. It now fills a reused buffer. Building S block-wise to avoid the gather
+entirely was tried and is **slower** (0.285 -> 0.404) because it turns two dense
+products into ~169 small ones per feature -- recorded at the call site so it is
+not retried.
+
+**Assembly buffer**: allocated and zeroed a 2000x300 matrix (4.8 MB) per frame
+while touching ~280 rows. Reused and cleared to the bound that can be written.
+
+### Standing, all 10 sequences
+
+| sequence | ATE | DOD total | official total |
+|---|---|---|---|
+| MH_01 | 0.1131 | **5.14** | 7.15 |
+| MH_02 | 0.1744 | **5.21** | 7.22 |
+| MH_03 | 0.2223 | **5.61** | 7.41 |
+| MH_04 | 0.4580 | **5.19** | 6.81 |
+| MH_05 | 0.3074 | **5.36** | 7.05 |
+| V1_01 | 0.0494 | **6.32** | 8.26 |
+| V1_02 | 0.0551 | **6.18** | 7.73 |
+| V1_03 | 0.0560 | **5.67** | 6.92 |
+| circle | 0.0374 | **4.58** | 6.50 |
+| infinity | 0.0261 | **5.01** | 7.26 |
+| **mean** | | **5.43** | 7.23 |
+
+**1.33x faster than official on every sequence**, with every ATE unchanged from
+before any of this optimisation work. The MSCKF stage is now 1.000 ms against
+official's 0.719; the remaining difference is spread thin (EKFUpdate 0.425,
+chi2 0.273, compression 0.160) with no single dominant term left.

@@ -183,9 +183,16 @@ void EKFUpdate(State& state, type::Variable** H_order, int num_H,
     }
 
     const auto ekf_t1 = std::chrono::steady_clock::now();
-    Eigen::MatrixXd P_small = get_marginal_covariance(state, H_order, num_H);
-    Eigen::MatrixXd S(R.rows(), R.rows());
-    S.triangularView<Eigen::Upper>() = H * P_small * H.transpose();
+    // S = H P H^T + R. The rows of M_a belonging to the measurement variables
+    // ARE P_small * H^T, so S is just H times those -- no need to gather an
+    // n_small x n_small marginal covariance again (that gather allocates and
+    // copies the whole block matrix a second time per update).
+    Eigen::MatrixXd S = Eigen::MatrixXd::Zero(R.rows(), R.rows());
+    for (int k = 0; k < num_H; ++k) {
+        type::Variable* meas_var = H_order[k];
+        S.noalias() += H.block(0, H_id[k], H.rows(), meas_var->size) *
+                       M_a.block(meas_var->id, 0, meas_var->size, res.size());
+    }
     S.triangularView<Eigen::Upper>() += R;
     Eigen::MatrixXd Sinv = Eigen::MatrixXd::Identity(R.rows(), R.rows());
     S.selfadjointView<Eigen::Upper>().llt().solveInPlace(Sinv);
@@ -257,23 +264,49 @@ void set_initial_covariance(State& state, const Eigen::MatrixXd& covariance,
     state.Cov.block(0, 0, total_size, total_size) = 0.5 * (state.Cov.block(0, 0, total_size, total_size) + state.Cov.block(0, 0, total_size, total_size).transpose());
 }
 
-Eigen::MatrixXd get_marginal_covariance(const State& state, type::Variable** small_variables, int num_small) {
+void get_marginal_covariance_into(const State& state, type::Variable** small_variables, int num_small,
+                                  Eigen::MatrixXd& out) {
     int cov_size = 0;
     for (int i = 0; i < num_small; ++i) {
         cov_size += small_variables[i]->size;
     }
-    
-    Eigen::MatrixXd Small_cov = Eigen::MatrixXd::Zero(cov_size, cov_size);
+    // resize() is a no-op when the size already matches, so a caller passing a
+    // reused buffer allocates at most once. The chi2 gate calls this per
+    // feature per frame, where the allocation was the dominant cost.
+    out.resize(cov_size, cov_size);
     int i_index = 0;
     for (int i = 0; i < num_small; ++i) {
         int rows = small_variables[i]->size;
         int k_index = 0;
         for (int k = 0; k < num_small; ++k) {
             int cols = small_variables[k]->size;
-            
-            Eigen::MatrixXd src_block = state.Cov.block(small_variables[i]->id, small_variables[k]->id, rows, cols);
-            Small_cov.block(i_index, k_index, rows, cols) = src_block;
-            
+            out.block(i_index, k_index, rows, cols) =
+                state.Cov.block(small_variables[i]->id, small_variables[k]->id, rows, cols);
+            k_index += cols;
+        }
+        i_index += rows;
+    }
+}
+
+Eigen::MatrixXd get_marginal_covariance(const State& state, type::Variable** small_variables, int num_small) {
+    int cov_size = 0;
+    for (int i = 0; i < num_small; ++i) {
+        cov_size += small_variables[i]->size;
+    }
+    
+    // No Zero() -- every block below is written, so the fill is wasted -- and no
+    // per-block temporary. Copying through `MatrixXd src_block = Cov.block(...)`
+    // heap-allocates once per (i,k) pair, which is ~169 allocations per call at
+    // 13 variables, and this is called once per feature in the chi2 gate.
+    Eigen::MatrixXd Small_cov(cov_size, cov_size);
+    int i_index = 0;
+    for (int i = 0; i < num_small; ++i) {
+        int rows = small_variables[i]->size;
+        int k_index = 0;
+        for (int k = 0; k < num_small; ++k) {
+            int cols = small_variables[k]->size;
+            Small_cov.block(i_index, k_index, rows, cols) =
+                state.Cov.block(small_variables[i]->id, small_variables[k]->id, rows, cols);
             k_index += cols;
         }
         i_index += rows;

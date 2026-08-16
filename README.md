@@ -11,7 +11,7 @@ It is a **data-oriented (DOD)** re-implementation of the algorithm behind
 [OpenVINS](https://github.com/rpng/open_vins). Across **10 benchmark sequences**
 (8 EuRoC + 2 KAIST), run against official OpenVINS on the same machine and
 scored by the same evaluator, it is **slightly more accurate on average (0.97×
-the ATE)** and **1.16× faster per frame**, winning every sequence on speed.
+the ATE)** and **1.33× faster per frame**, winning every sequence on speed.
 
 ---
 
@@ -201,10 +201,10 @@ Mean ms per camera frame on an AMD Ryzen 9 7950X, both sides timed *internally*
 | **mean (EuRoC)** | **1.80** | 2.24 | **4.52** | 5.08 | **6.32** | 7.32 |
 
 - **Front-end: DOD faster on all 10**, by 20–40% (**1.30×**).
-- **Back-end: DOD faster on all 10** after the EKF rework below (4.52 vs
-  5.08 ms mean on EuRoC). It had been 8% *slower* until profiling showed why.
-- **Total: DOD 6.32 vs official 7.32 ms — 1.16× faster**, on every sequence.
-  Both run **6–8× faster than real time** against a 50 ms budget at 20 Hz.
+- **Back-end: DOD faster on all 10** after the profiling work below (3.72 vs
+  5.01 ms mean). It had been 8% *slower* before it.
+- **Total: DOD 5.43 vs official 7.23 ms — 1.33× faster**, on every sequence.
+  DOD runs **9× faster than real time** against a 50 ms budget at 20 Hz.
 
 #### Where the back-end time went
 
@@ -213,17 +213,35 @@ The cost was not in the filter math but in how it was written:
 | | before | after |
 |---|---|---|
 | `M_a = P·Hᵀ` | 1.458 ms | **0.665** |
-| covariance update | 0.954 ms | **0.750** |
-| MSCKF stage | 1.535 ms | **1.390** |
-| SLAM stage | 2.684 ms | **1.970** |
+| covariance update | 0.954 ms | **0.745** |
+| `S = HPHᵀ + R` | 0.637 ms | **0.432** |
+| measurement compression | 0.437 ms | **0.160** |
+| chi2 gate | 0.322 ms | **0.273** |
+| **MSCKF stage** | 1.535 ms | **1.000** |
+| **SLAM stage** | 2.684 ms | **1.761** |
 
-`M_a` was built by looping over *every state variable* × every measurement
-variable — ~65 × 13 tiny matrix products, each allocating its own temporary.
-Accumulating over measurement variables alone against full-height covariance
-blocks is the same sum in ~13 tall GEMMs. The covariance update mirrored its
-upper triangle through a self-assignment that Eigen evaluates via a full N×N
-temporary; an explicit column-wise copy removes the allocation. Both are pure
-rewrites — **every ATE is bit-identical**.
+Every one of these was an expression problem, not an algorithm problem, and
+**every ATE is bit-identical** afterwards:
+
+- `M_a` looped over every state variable × every measurement variable — ~65 × 13
+  tiny products, each allocating a temporary. Accumulating over measurement
+  variables alone against full-height covariance blocks is the same sum in ~13
+  tall GEMMs.
+- The covariance update mirrored its upper triangle through a self-assignment
+  Eigen evaluates via a full N×N temporary; an explicit column-wise copy removes
+  the allocation.
+- `S = H P Hᵀ` re-gathered the marginal covariance, when the rows of `M_a`
+  belonging to the measurement variables already *are* `P·Hᵀ`.
+- Measurement compression swept ~23k individual Givens rotations; one blocked
+  Householder QR of `[H | res]` gives the same R without ever forming Q. (The
+  EKF update is invariant to left-multiplication by an orthogonal matrix, which
+  is the entire premise of the compression.)
+- The chi2 gate allocated an 83×83 marginal covariance per feature per frame;
+  it now fills a reused buffer. Building `S` block-wise to skip the gather
+  entirely was tried and is *slower* (0.285 → 0.404 ms) — it trades two dense
+  products for ~169 small ones.
+- The MSCKF assembly buffer allocated and zeroed a 2000×300 matrix (4.8 MB)
+  every frame while touching ~280 rows.
 
 (Collapsing the mirror into one dense `Cov -= K·M_aᵀ` looks tempting and is
 wrong: the product is symmetric in exact arithmetic but not in floating point,

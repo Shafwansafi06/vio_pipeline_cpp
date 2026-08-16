@@ -86,17 +86,25 @@ void measurement_compress_inplace(Eigen::MatrixXd& H_x, Eigen::VectorXd& res) {
     // thin -- official leaves such a system untouched.
     if (H_x.rows() <= H_x.cols())
         return;
-    Eigen::JacobiRotation<double> tempHo_GR;
-    for (int n = 0; n < H_x.cols(); n++) {
-        for (int m = (int)H_x.rows() - 1; m > n; m--) {
-            tempHo_GR.makeGivens(H_x(m - 1, n), H_x(m, n));
-            (H_x.block(m - 1, n, 2, H_x.cols() - n)).applyOnTheLeft(0, 1, tempHo_GR.adjoint());
-            (res.block(m - 1, 0, 2, 1)).applyOnTheLeft(0, 1, tempHo_GR.adjoint());
-        }
-    }
-    int r = std::min(H_x.rows(), H_x.cols());
-    H_x.conservativeResize(r, H_x.cols());
-    res.conservativeResize(r, res.cols());
+    // The EKF update is invariant to multiplying [H | res] on the left by any
+    // orthogonal matrix, which is the whole point of this compression: keep the
+    // top rows of the QR and throw the rest away. Official sweeps the system
+    // with ~23k individual Givens rotations, each a separate 2 x (cols - n)
+    // Eigen call; one blocked Householder QR of the augmented matrix produces
+    // the same R (up to row signs, which the update does not see) in a fraction
+    // of the time. Augmenting res as the last column is what avoids ever
+    // forming Q.
+    const int rows = int(H_x.rows());
+    const int cols = int(H_x.cols());
+    Eigen::MatrixXd augmented(rows, cols + 1);
+    augmented.leftCols(cols) = H_x;
+    augmented.col(cols) = res;
+
+    Eigen::HouseholderQR<Eigen::MatrixXd> qr(augmented);
+    const Eigen::MatrixXd R = qr.matrixQR().topRows(cols).triangularView<Eigen::Upper>();
+
+    H_x = R.leftCols(cols);
+    res = R.col(cols);
 }
 
 void get_feature_jacobian_full(const State& state, const core::Feature& feature,
@@ -309,12 +317,24 @@ void update_msckf(UpdaterMSCKFData& updater, State& state, core::Feature** featu
     }
     
     // Accumulate linear system
-    Eigen::MatrixXd Hx_big;
-    Eigen::VectorXd res_big;
+    // Reused across frames: this used to allocate and zero a 2000x300 matrix
+    // (4.8 MB) on every call, of which only the first ~280 rows are ever
+    // touched. Only the rows that can actually be written are cleared.
+    static thread_local Eigen::MatrixXd Hx_big;
+    static thread_local Eigen::VectorXd res_big;
     {
         SubTimer alloc_timer(msckf_ms_alloc);
-        Hx_big = Eigen::MatrixXd::Zero(2000, 300);
-        res_big = Eigen::VectorXd::Zero(2000);
+        if (Hx_big.rows() < 2000 || Hx_big.cols() < 300) {
+            Hx_big.setZero(2000, 300);
+            res_big.setZero(2000);
+        }
+        int rows_upper_bound = 0;
+        for (int i = 0; i < feature_count; ++i) {
+            rows_upper_bound += 2 * feature_vec[i]->num_measurements;
+        }
+        rows_upper_bound = std::min(rows_upper_bound, int(Hx_big.rows()));
+        Hx_big.topRows(rows_upper_bound).setZero();
+        res_big.head(rows_upper_bound).setZero();
     }
     int total_rows = 0;
     
@@ -356,15 +376,22 @@ void update_msckf(UpdaterMSCKFData& updater, State& state, core::Feature** featu
         
         // Chi-Square Check
         SubTimer chi2_timer(msckf_ms_chi2);
-        Eigen::MatrixXd P_marg = get_marginal_covariance(state, Hx_order, num_Hx);
+        // Official: S = H P H^T, add sigma^2 to the diagonal, chi2 =
+        // res . S.llt().solve(res). What was here additionally formed
+        // 0.5*(S + S^T) -- a full temporary of a matrix that is already
+        // symmetric by construction -- and solved with an LDLT.
+        // Gather the marginal covariance into a reused buffer. Building S block
+        // by block instead (avoiding the gather entirely) was tried and is
+        // SLOWER here -- 0.285 -> 0.404 ms/frame -- because it turns two dense
+        // products into ~13x13 small ones per feature. The gather wins; only its
+        // allocation is worth removing.
+        static thread_local Eigen::MatrixXd P_marg;
+        get_marginal_covariance_into(state, Hx_order, num_Hx, P_marg);
         Eigen::MatrixXd S = H_x * P_marg * H_x.transpose();
-        for (int i = 0; i < S.rows(); ++i) {
-            S(i, i) += updater.options.sigma_pix_sq;
-        }
-        S = 0.5 * (S + S.transpose());
-        
+        S.diagonal().array() += updater.options.sigma_pix_sq;
+
         double chi2 = 99999.0;
-        Eigen::LDLT<Eigen::MatrixXd> solver(S);
+        Eigen::LLT<Eigen::MatrixXd> solver(S);
         if (solver.info() == Eigen::Success) {
             chi2 = res.dot(solver.solve(res));
         }

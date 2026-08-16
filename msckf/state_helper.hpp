@@ -24,6 +24,8 @@ void EKFUpdate(State& state, type::Variable** H_order, int num_H,
 void set_initial_covariance(State& state, const Eigen::MatrixXd& covariance,
                                        type::Variable** order, int num_order);
                                        
+void get_marginal_covariance_into(const State& state, type::Variable** small_variables, int num_small,
+                                  Eigen::MatrixXd& out);
 Eigen::MatrixXd get_marginal_covariance(const State& state, type::Variable** small_variables, int num_small);
     
 Eigen::MatrixXd get_full_covariance(const State& state);
