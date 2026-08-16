@@ -545,8 +545,24 @@ void update_slam(UpdaterSLAMData& updater, State& state, core::Feature** feature
     double clonetimes[20];
     for (int c = 0; c < state.num_clones; ++c) clonetimes[c] = state.clones_IMU[c].timestamp;
 
-    Eigen::MatrixXd Hx_big = Eigen::MatrixXd::Zero(2000, 300);
-    Eigen::VectorXd res_big = Eigen::VectorXd::Zero(2000);
+    // Reused across frames -- see the MSCKF updater for the same fix. DHAT
+    // measured this one call site churning 1.68 GB (351 blocks of 4.8 MB) over
+    // 12 s of EuRoC, the largest single consumer of allocated bytes.
+    static thread_local Eigen::MatrixXd Hx_big;
+    static thread_local Eigen::VectorXd res_big;
+    if (Hx_big.rows() < 2000 || Hx_big.cols() < 300) {
+        Hx_big.setZero(2000, 300);
+        res_big.setZero(2000);
+    }
+    {
+        int rows_upper_bound = 0;
+        for (int i = 0; i < feature_count; ++i) {
+            rows_upper_bound += 2 * feature_vec[i]->num_measurements;
+        }
+        rows_upper_bound = std::min(rows_upper_bound, int(Hx_big.rows()));
+        Hx_big.topRows(rows_upper_bound).setZero();
+        res_big.head(rows_upper_bound).setZero();
+    }
     int total_rows = 0;
 
     type::Variable* hx_order_big[150];

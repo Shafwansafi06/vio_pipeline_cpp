@@ -1850,3 +1850,60 @@ while touching ~280 rows. Reused and cleared to the bound that can be written.
 before any of this optimisation work. The MSCKF stage is now 1.000 ms against
 official's 0.719; the remaining difference is spread thin (EKFUpdate 0.425,
 chi2 0.273, compression 0.160) with no single dominant term left.
+
+---
+
+## Benchmark 14 — allocation profiling (DHAT) and end-to-end timing (hyperfine)
+
+Tools: valgrind's DHAT for allocation accounting, hyperfine for wall-clock.
+hyperfine is a static musl binary in `~/bin` on the lab box and
+`/usr/local/bin` inside `ros_container_v2`; valgrind was already installed.
+
+### Dynamic allocation, 12 s of EuRoC MH_01
+
+| | blocks | bytes |
+|---|---|---|
+| before | 1,322,658 | 5.32 GB |
+| after | 825,790 | **2.02 GB** |
+| | -38% | **-62%** |
+
+Three sites accounted for nearly all of the DOD-attributable churn:
+
+**`initialize_invertible`** -- 463k allocations, the largest count in the whole
+pipeline. Same nested-loop shape as EKFUpdate before Benchmark 12: it allocated
+THREE heap temporaries (`M_i`, `cov_block`, `H_R_block`) per (state variable,
+measurement variable) pair. Rewritten to accumulate over measurement variables
+against full-height covariance blocks, and to build `M = H P H^T + R` from the
+rows of `M_a` instead of gathering the marginal covariance.
+
+**`update_slam`** -- 1.68 GB in 351 blocks, the largest byte consumer. It
+allocated and zeroed a 2000x300 matrix (4.8 MB) per call, the same buffer the
+MSCKF updater had. Reused and cleared only to the row bound that can be written.
+
+**KLT pyramids** -- ~1.27 GB. `calcOpticalFlowPyrLK` builds a pyramid for BOTH
+of its inputs on every call, and a frame makes three calls (two temporal, one
+stereo): six pyramid builds per frame instead of two. Now built once per image
+with `buildOpticalFlowPyramid` and reused, with the previous frame's pyramids
+swapped in as the "from" side.
+
+All ATEs unchanged across all 8 EuRoC sequences. Stage effects: SLAM
+1.761 -> 1.568 ms, slam-delayed 0.387 -> 0.344, tracking 1.64 -> 1.50,
+estimator 3.50 -> 3.26.
+
+What remains is mostly not ours: OpenCV's KLT internals are 394k blocks on their
+own, and EKFUpdate's ~33k blocks are Eigen expression temporaries (M_a, S, Sinv,
+K, dx) at roughly 140 per frame.
+
+### hyperfine, same bag, same machine, 5 runs each
+
+| dataset | DOD | Official OpenVINS | |
+|---|---|---|---|
+| EuRoC MH_01 | **18.656 s** ± 0.110 | 29.014 s ± 0.046 | **1.56x faster** |
+| KAIST circle | **21.321 s** ± 0.039 | 27.952 s ± 0.230 | **1.31x faster** |
+
+This is whole-process wall clock -- bag reading, image decode, tracking,
+estimation, output -- not the internal per-frame timers, and it is measured
+through DOD's *rosbag* runner, so both sides read the identical bag through the
+identical transport. Official exits non-zero at shutdown (a class_loader unload
+throw, after all its work and output are complete), so hyperfine is run with
+`-i`.

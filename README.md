@@ -206,6 +206,31 @@ Mean ms per camera frame on an AMD Ryzen 9 7950X, both sides timed *internally*
 - **Total: DOD 5.43 vs official 7.23 ms — 1.33× faster**, on every sequence.
   DOD runs **9× faster than real time** against a 50 ms budget at 20 Hz.
 
+Measured end to end with [hyperfine](https://github.com/sharkdp/hyperfine) —
+whole process, same bag, same transport, 5 runs each:
+
+| dataset | DOD | Official | |
+|---|---|---|---|
+| EuRoC MH_01 | **18.656 s** ± 0.110 | 29.014 s ± 0.046 | **1.56× faster** |
+| KAIST circle | **21.321 s** ± 0.039 | 27.952 s ± 0.230 | **1.31× faster** |
+
+### Allocation behaviour
+
+"No per-frame heap allocation" is a design claim, so it is checked with
+valgrind's DHAT rather than asserted. Over 12 s of MH_01:
+
+| | blocks | bytes |
+|---|---|---|
+| before | 1,322,658 | 5.32 GB |
+| **after** | **825,790** | **2.02 GB** |
+
+Three sites carried almost all of it: `initialize_invertible` allocated three
+temporaries per (state variable × measurement variable) pair (463k allocations),
+`update_slam` allocated and zeroed a 4.8 MB buffer per call (1.68 GB), and the
+KLT stage let OpenCV rebuild image pyramids on all six of its per-frame inputs
+instead of the two that change (~1.27 GB). What is left is dominated by OpenCV's
+own KLT internals.
+
 #### Where the back-end time went
 
 The cost was not in the filter math but in how it was written:

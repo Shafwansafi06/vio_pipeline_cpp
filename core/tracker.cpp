@@ -144,7 +144,19 @@ void tracks_to_points(const TrackPoint* tracks, int count, Point2f* points) {
     for (int i = 0; i < count; ++i) points[i] = Point2f(tracks[i].x, tracks[i].y);
 }
 
-void run_lk(const cv::Mat& from, const cv::Mat& to, const Point2f* old_points,
+// Pyramids are built once per image and reused across all three LK calls a
+// frame makes (two temporal, one stereo). Passing plain images instead makes
+// calcOpticalFlowPyrLK build a pyramid for BOTH of its inputs on every call --
+// six builds per frame instead of two. DHAT measured that as ~1.27 GB of the
+// pipeline's allocated bytes, the largest single consumer.
+void build_pyramid(const cv::Mat& image, std::vector<cv::Mat>& pyramid,
+                   const TrackerOptions& options) {
+    cv::buildOpticalFlowPyramid(image, pyramid,
+                                cv::Size(options.window_size, options.window_size),
+                                options.pyramid_levels);
+}
+
+void run_lk(const std::vector<cv::Mat>& from, const std::vector<cv::Mat>& to, const Point2f* old_points,
             Point2f* new_points, std::uint8_t* status, float* error, int count,
             const TrackerOptions& options) {
     if (count == 0) return;
@@ -253,6 +265,13 @@ int track_stereo_frame(TrackerData& tracker, double timestamp,
     preprocess(left, current[0], tracker.options.histogram_method);
     preprocess(right, current[1], tracker.options.histogram_method);
 
+    // One pyramid per camera per frame; last frame's become this frame's "from".
+    static thread_local std::vector<cv::Mat> pyramid_current[2];
+    static thread_local std::vector<cv::Mat> pyramid_previous[2];
+    for (int cam = 0; cam < 2; ++cam) {
+        build_pyramid(current[cam], pyramid_current[cam], tracker.options);
+    }
+
     int observation_count = 0;
     static TrackPoint new_previous[2][TRACKER_MAX_FEATURES];
     int new_count[2] = {0, 0};
@@ -266,7 +285,8 @@ int track_stereo_frame(TrackerData& tracker, double timestamp,
         static std::uint8_t status[TRACKER_MAX_FEATURES];
         static float error[TRACKER_MAX_FEATURES];
         tracks_to_points(tracker.previous[cam], old_count, old_pts);
-        run_lk(previous[cam], current[cam], old_pts, new_pts, status, error, old_count, tracker.options);
+        if (pyramid_previous[cam].empty()) continue;
+        run_lk(pyramid_previous[cam], pyramid_current[cam], old_pts, new_pts, status, error, old_count, tracker.options);
 
         static Point2f old_norm[TRACKER_MAX_FEATURES], new_norm[TRACKER_MAX_FEATURES];
         for (int i = 0; i < old_count; ++i) {
@@ -305,7 +325,7 @@ int track_stereo_frame(TrackerData& tracker, double timestamp,
         static std::uint8_t status_stereo[TRACKER_MAX_FEATURES];
         static float error_stereo[TRACKER_MAX_FEATURES];
         tracks_to_points(new_previous[0] + before_detection, added, detected_left);
-        run_lk(current[0], current[1], detected_left, detected_right,
+        run_lk(pyramid_current[0], pyramid_current[1], detected_left, detected_right,
                status_stereo, error_stereo, added, tracker.options);
         for (int i = 0; i < added; ++i) {
             if (status_stereo[i] && in_bounds(detected_right[i], tracker.width, tracker.height) &&
@@ -321,6 +341,7 @@ int track_stereo_frame(TrackerData& tracker, double timestamp,
     }
     current[0].copyTo(previous[0]);
     current[1].copyTo(previous[1]);
+    for (int cam = 0; cam < 2; ++cam) pyramid_previous[cam].swap(pyramid_current[cam]);
 
     // Track instrumentation. Per frame: "F <ts>", then one "<cam> <id> <u> <v>"
     // line per surviving track -- the exact analogue of official TrackKLT's

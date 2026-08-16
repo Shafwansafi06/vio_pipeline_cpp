@@ -492,21 +492,27 @@ void initialize_invertible(State& state, type::Variable* new_variable,
         current_it += H_order[i]->size;
     }
     
-    for (int i = 0; i < state.num_variables; ++i) {
-        type::Variable* var = state.variables[i];
-        Eigen::MatrixXd M_i = Eigen::MatrixXd::Zero(var->size, res_sz);
-        for (int k = 0; k < num_H; ++k) {
-            type::Variable* meas_var = H_order[k];
-            Eigen::MatrixXd cov_block = state.Cov.block(var->id, meas_var->id, var->size, meas_var->size);
-            Eigen::MatrixXd H_R_block = H_R.block(0, H_id[k], H_R.rows(), meas_var->size);
-            
-            M_i += cov_block * H_R_block.transpose();
-        }
-        M_a.block(var->id, 0, var->size, res_sz) = M_i;
+    // Same shape as EKFUpdate: accumulate M_a = P * H_R^T over MEASUREMENT
+    // variables against full-height covariance blocks. The previous nested loop
+    // allocated three heap temporaries per (state variable, measurement
+    // variable) pair -- `M_i`, `cov_block` and `H_R_block` -- which DHAT
+    // measured as 463k allocations over 12 s of EuRoC, the single largest
+    // allocation source in the pipeline.
+    for (int k = 0; k < num_H; ++k) {
+        type::Variable* meas_var = H_order[k];
+        M_a.noalias() += state.Cov.block(0, meas_var->id, oldSize, meas_var->size) *
+                         H_R.block(0, H_id[k], H_R.rows(), meas_var->size).transpose();
     }
-    
-    Eigen::MatrixXd P_small = get_marginal_covariance(state, H_order, num_H);
-    Eigen::MatrixXd M = H_R * P_small * H_R.transpose() + R;
+
+    // M = H_R P H_R^T + R, built from the rows of M_a that belong to the
+    // measurement variables (those rows already are P_small * H_R^T), so the
+    // marginal covariance never has to be gathered.
+    Eigen::MatrixXd M = R;
+    for (int k = 0; k < num_H; ++k) {
+        type::Variable* meas_var = H_order[k];
+        M.noalias() += H_R.block(0, H_id[k], H_R.rows(), meas_var->size) *
+                       M_a.block(meas_var->id, 0, meas_var->size, res_sz);
+    }
     
     Eigen::MatrixXd H_Linv = H_L.inverse();
     Eigen::MatrixXd P_LL = H_Linv * M * H_Linv.transpose();
