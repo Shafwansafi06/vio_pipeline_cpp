@@ -8,6 +8,12 @@
 
 namespace msckf {
 
+// Sub-stage timing inside update_msckf (ms, accumulated), defined in updaters.cpp.
+extern long msckf_calls, msckf_rows_pre, msckf_cols, msckf_rows_post, msckf_cov;
+extern double msckf_ms_tri, msckf_ms_jac, msckf_ms_chi2, msckf_ms_assemble,
+              msckf_ms_alloc, msckf_ms_compress, msckf_ms_ekf;
+
+
 // Anchor-change accounting, defined in updaters.cpp. Each failure path kills a
 // SLAM landmark, so they are counted rather than silent.
 extern long anchor_marg_no_old, anchor_marg_depth, anchor_marg_transform, anchor_change_ok;

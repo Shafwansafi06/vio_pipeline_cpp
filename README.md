@@ -11,8 +11,7 @@ It is a **data-oriented (DOD)** re-implementation of the algorithm behind
 [OpenVINS](https://github.com/rpng/open_vins). Across **10 benchmark sequences**
 (8 EuRoC + 2 KAIST), run against official OpenVINS on the same machine and
 scored by the same evaluator, it is **slightly more accurate on average (0.97×
-the ATE)** with a **1.30× faster front-end** and an **overall per-frame cost
-within 1%** of official's.
+the ATE)** and **1.16× faster per frame**, winning every sequence on speed.
 
 ---
 
@@ -189,23 +188,46 @@ Mean ms per camera frame on an AMD Ryzen 9 7950X, both sides timed *internally*
 
 | Sequence | DOD track | OV track | DOD est | OV est | **DOD total** | **OV total** |
 |---|---|---|---|---|---|---|
-| MH_01 | **1.657** | 2.107 | 5.142 | **5.046** | **6.800** | 7.152 |
-| MH_02 | **1.677** | 2.191 | 5.125 | **5.032** | **6.802** | 7.223 |
-| MH_03 | **1.710** | 2.172 | 5.803 | **5.240** | 7.513 | **7.412** |
-| MH_04 | **1.813** | 2.169 | 5.027 | **4.641** | 6.840 | **6.810** |
-| MH_05 | **1.804** | 2.190 | 5.287 | **4.859** | 7.091 | **7.049** |
-| V1_01 | **1.741** | 2.219 | 6.982 | **6.040** | 8.723 | **8.259** |
-| V1_02 | **1.914** | 2.358 | 6.225 | **5.377** | 8.139 | **7.735** |
-| V1_03 | **2.058** | 2.519 | 5.268 | **4.405** | 7.326 | **6.924** |
-| circle | **1.392** | 1.998 | 4.792 | **4.507** | **6.184** | 6.504 |
-| infinity | **1.371** | 2.295 | 5.459 | **4.964** | **6.830** | 7.259 |
-| **mean** | **1.71** | 2.22 | 5.51 | **5.11** | 7.22 | 7.23 |
+| MH_01 | **1.66** | 2.11 | **4.14** | 5.05 | **5.80** | 7.15 |
+| MH_02 | **1.67** | 2.19 | **4.09** | 5.03 | **5.76** | 7.22 |
+| MH_03 | **1.74** | 2.17 | **4.68** | 5.24 | **6.42** | 7.41 |
+| MH_04 | **1.81** | 2.17 | **4.09** | 4.64 | **5.90** | 6.81 |
+| MH_05 | **1.81** | 2.19 | **4.26** | 4.86 | **6.07** | 7.05 |
+| V1_01 | **1.78** | 2.22 | **5.60** | 6.04 | **7.39** | 8.26 |
+| V1_02 | **1.90** | 2.36 | **5.01** | 5.38 | **6.92** | 7.73 |
+| V1_03 | **2.04** | 2.52 | **4.28** | 4.40 | **6.32** | 6.92 |
+| circle | **1.42** | 2.00 | **3.91** | 4.51 | **5.33** | 6.50 |
+| infinity | **1.38** | 2.30 | **4.39** | 4.96 | **5.77** | 7.26 |
+| **mean (EuRoC)** | **1.80** | 2.24 | **4.52** | 5.08 | **6.32** | 7.32 |
 
 - **Front-end: DOD faster on all 10**, by 20–40% (**1.30×**).
-- **Back-end: DOD slower on all 10**, by 2–20% (**1.08×**) — the cost of feeding
-  ~2× the features per MSCKF update, which is what buys the accuracy above.
-- **Total: a tie** (7.22 vs 7.23 ms). Both run **6–8× faster than real time**
-  against a 50 ms budget at 20 Hz.
+- **Back-end: DOD faster on all 10** after the EKF rework below (4.52 vs
+  5.08 ms mean on EuRoC). It had been 8% *slower* until profiling showed why.
+- **Total: DOD 6.32 vs official 7.32 ms — 1.16× faster**, on every sequence.
+  Both run **6–8× faster than real time** against a 50 ms budget at 20 Hz.
+
+#### Where the back-end time went
+
+The cost was not in the filter math but in how it was written:
+
+| | before | after |
+|---|---|---|
+| `M_a = P·Hᵀ` | 1.458 ms | **0.665** |
+| covariance update | 0.954 ms | **0.750** |
+| MSCKF stage | 1.535 ms | **1.390** |
+| SLAM stage | 2.684 ms | **1.970** |
+
+`M_a` was built by looping over *every state variable* × every measurement
+variable — ~65 × 13 tiny matrix products, each allocating its own temporary.
+Accumulating over measurement variables alone against full-height covariance
+blocks is the same sum in ~13 tall GEMMs. The covariance update mirrored its
+upper triangle through a self-assignment that Eigen evaluates via a full N×N
+temporary; an explicit column-wise copy removes the allocation. Both are pure
+rewrites — **every ATE is bit-identical**.
+
+(Collapsing the mirror into one dense `Cov -= K·M_aᵀ` looks tempting and is
+wrong: the product is symmetric in exact arithmetic but not in floating point,
+and the drift drives covariance diagonals negative within seconds.)
 
 ### Per-sequence trajectories
 

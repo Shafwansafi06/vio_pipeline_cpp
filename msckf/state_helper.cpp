@@ -1,4 +1,6 @@
 #include "state_helper.hpp"
+
+#include <chrono>
 #include "../type/quat_ops.hpp"
 #include <Eigen/Dense>
 #include <iostream>
@@ -7,6 +9,8 @@
 #include <cmath>
 
 namespace msckf {
+
+double ekf_ms_ma = 0.0, ekf_ms_s = 0.0, ekf_ms_k = 0.0, ekf_ms_cov = 0.0;
 
 // Number of times EKFUpdate saw a negative covariance diagonal -- the condition
 // official Open_VINS treats as fatal. Reported by the runners at shutdown.
@@ -157,6 +161,7 @@ void EKFUpdate(State& state, type::Variable** H_order, int num_H,
     //      instead of failing. The floor is gone; see the counter below.
 
     int total_size = state.cov_size;
+    const auto ekf_t0 = std::chrono::steady_clock::now();
     Eigen::MatrixXd M_a = Eigen::MatrixXd::Zero(total_size, res.size());
 
     int current_it = 0;
@@ -166,28 +171,48 @@ void EKFUpdate(State& state, type::Variable** H_order, int num_H,
         current_it += H_order[i]->size;
     }
 
-    for (int i = 0; i < state.num_variables; ++i) {
-        type::Variable* var = state.variables[i];
-        Eigen::MatrixXd M_i = Eigen::MatrixXd::Zero(var->size, res.size());
-        for (int k = 0; k < num_H; ++k) {
-            type::Variable* meas_var = H_order[k];
-            M_i.noalias() += state.Cov.block(var->id, meas_var->id, var->size, meas_var->size) *
-                             H.block(0, H_id[k], H.rows(), meas_var->size).transpose();
-        }
-        M_a.block(var->id, 0, var->size, res.size()) = M_i;
+    // M_a = P * H^T, accumulated one MEASUREMENT variable at a time over the
+    // full column of the covariance. Official loops over every state variable
+    // and, inside that, over every measurement variable -- mathematically the
+    // same sum, but ~65 x 13 tiny GEMMs (each with its own heap-allocated M_i)
+    // instead of ~13 tall ones. Same arithmetic, same result, far fewer calls.
+    for (int k = 0; k < num_H; ++k) {
+        type::Variable* meas_var = H_order[k];
+        M_a.noalias() += state.Cov.block(0, meas_var->id, total_size, meas_var->size) *
+                         H.block(0, H_id[k], H.rows(), meas_var->size).transpose();
     }
 
+    const auto ekf_t1 = std::chrono::steady_clock::now();
     Eigen::MatrixXd P_small = get_marginal_covariance(state, H_order, num_H);
     Eigen::MatrixXd S(R.rows(), R.rows());
     S.triangularView<Eigen::Upper>() = H * P_small * H.transpose();
     S.triangularView<Eigen::Upper>() += R;
     Eigen::MatrixXd Sinv = Eigen::MatrixXd::Identity(R.rows(), R.rows());
     S.selfadjointView<Eigen::Upper>().llt().solveInPlace(Sinv);
+    const auto ekf_t2 = std::chrono::steady_clock::now();
     Eigen::MatrixXd K = M_a * Sinv.selfadjointView<Eigen::Upper>();
+    const auto ekf_t3 = std::chrono::steady_clock::now();
 
     state.Cov.block(0, 0, total_size, total_size).triangularView<Eigen::Upper>() -= K * M_a.transpose();
-    state.Cov.block(0, 0, total_size, total_size) =
-        state.Cov.block(0, 0, total_size, total_size).selfadjointView<Eigen::Upper>();
+    // Mirror the upper triangle into the lower one column by column. The
+    // previous `Cov.block(...) = Cov.block(...).selfadjointView<Upper>()` is a
+    // self-assignment Eigen has to evaluate through a full N x N temporary,
+    // which it allocates on every update.
+    //
+    // Do NOT "simplify" this into one dense `Cov -= K * M_a.transpose()`.
+    // K*M_a^T is symmetric in exact arithmetic but not in floating point, and
+    // the resulting asymmetry drives covariance diagonals negative within a few
+    // hundred frames -- measured: EKFPropagation aborts on MH_01 at ~t+16 s.
+    for (int c = 0; c + 1 < total_size; ++c) {
+        state.Cov.block(c + 1, c, total_size - c - 1, 1) =
+            state.Cov.block(c, c + 1, 1, total_size - c - 1).transpose();
+    }
+
+    const auto ekf_t4 = std::chrono::steady_clock::now();
+    ekf_ms_ma += std::chrono::duration<double, std::milli>(ekf_t1 - ekf_t0).count();
+    ekf_ms_s += std::chrono::duration<double, std::milli>(ekf_t2 - ekf_t1).count();
+    ekf_ms_k += std::chrono::duration<double, std::milli>(ekf_t3 - ekf_t2).count();
+    ekf_ms_cov += std::chrono::duration<double, std::milli>(ekf_t4 - ekf_t3).count();
 
     // Official exits the process here. We count and report instead, so a run
     // that would have died still produces a trajectory to diagnose -- but the

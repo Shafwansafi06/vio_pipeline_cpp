@@ -1717,3 +1717,80 @@ finding was also a casualty of the IMU-ordering bug, not a property of SLAM.
 Six wins, four losses, none of them large, no divergences. What is left is not a
 dataset-shaped gap; it is per-dataset tuning that nobody has systematically
 searched, plus the missing Ceres MLE refinement in the dynamic initializer.
+
+---
+
+## Benchmark 12 — why the MSCKF update cost 2x official's (2026-08-16)
+
+Two questions, both answered by measurement rather than reasoning.
+
+### Does official's cap of 40 make us faster? No — and it costs accuracy.
+
+| cap | MH_01 | MH_02 | MH_04 | V1_01 | total ms (MH_01) |
+|---|---|---|---|---|---|
+| 40 (official's) | 0.1252 | **diverges** | 0.4769 | 0.0506 | 6.88 |
+| 75 (shipped) | **0.1131** | 0.1744 | **0.4580** | **0.0494** | 6.80 |
+
+Cap 40 is worse on 6 of 8 sequences, reintroduces the MH_02 divergence, and is
+**no faster** -- the MSCKF stage itself barely moves (1.581 vs 1.538 ms). The
+cap rarely binds, so it was never what drove the cost.
+
+**This also retracts an explanation given earlier**: the back-end being slower
+than official's was NOT "the cost of feeding ~2x the features". Feature count
+was not the variable.
+
+### Where the time actually was
+
+Sub-stage timing inside `update_msckf` (ms/frame, MH_01):
+
+| | ms |
+|---|---|
+| EKFUpdate | 0.590 |
+| measurement compression | 0.437 |
+| chi2 gate | 0.319 |
+| Jacobians | 0.066 |
+| triangulation | 0.048 |
+
+and inside `EKFUpdate`, across all updates (MSCKF + SLAM), 3.32 ms/frame total:
+
+| | before | after |
+|---|---|---|
+| `M_a = P·Hᵀ` | 1.458 | **0.665** |
+| covariance update | 0.954 | **0.750** |
+| S + inverse | 0.637 | 0.638 |
+| K | 0.272 | 0.273 |
+
+**`M_a` was the defect.** It looped over every state variable and, inside that,
+every measurement variable -- ~65 x 13 tiny matrix products, each allocating its
+own `M_i` temporary. Official's loop is written the same way, but the fix is to
+accumulate over measurement variables alone against full-height covariance
+blocks: identical arithmetic, ~13 tall GEMMs instead of ~845 small ones.
+
+**The covariance update** mirrored its upper triangle with
+`Cov.block(...) = Cov.block(...).selfadjointView<Upper>()`, a self-assignment
+Eigen evaluates through a full N x N temporary allocated on every update. An
+explicit column-wise copy removes the allocation.
+
+A third "optimisation" was tried and reverted: collapsing the triangular update
+plus mirror into one dense `Cov -= K * M_a.transpose()`. `K*M_a^T` is symmetric
+in exact arithmetic but not in floating point, and the asymmetry drives
+covariance diagonals negative -- EKFPropagation aborts on MH_01 within ~16 s.
+
+### Result
+
+Every ATE is bit-identical; the pipeline is simply faster.
+
+| | before | after | official |
+|---|---|---|---|
+| MSCKF stage | 1.535 | **1.390** | 0.719 |
+| SLAM stage | 2.684 | **1.970** | 2.558 |
+| estimator mean | 5.51 | **4.52** | 5.08 |
+| **total mean** | 7.40 | **6.32** | 7.32 |
+
+DOD is now faster than official on **all 10 sequences** and 1.16x faster on
+average, having been a tie. KAIST: circle 6.18 -> 5.33 ms, infinity 6.83 ->
+5.77 ms.
+
+The MSCKF stage is still ~2x official's (1.390 vs 0.719) with the remaining
+cost in measurement compression (0.437) and the per-feature chi2 gate (0.319);
+those are the next targets if this needs to go further.

@@ -5,6 +5,8 @@
 
 namespace msckf {
 
+extern double ekf_ms_ma, ekf_ms_s, ekf_ms_k, ekf_ms_cov;
+
 // Count of negative covariance diagonals seen in EKFUpdate (official exits on
 // the first one). Non-zero means the filter is running in a state official
 // would call corrupt.

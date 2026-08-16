@@ -1,4 +1,6 @@
 #include "updaters.hpp"
+
+#include <chrono>
 #include "state_helper.hpp"
 #include "updater_mixed.hpp"
 #include "updater_slam_helper.hpp"
@@ -257,6 +259,20 @@ void init_updater_msckf(UpdaterMSCKFData& updater, const UpdaterOptions& options
     updater.feat_init_options = feat_init_options;
 }
 
+// Sub-stage timing for the MSCKF update, reported by the runners.
+double msckf_ms_tri = 0.0, msckf_ms_jac = 0.0, msckf_ms_chi2 = 0.0,
+       msckf_ms_assemble = 0.0, msckf_ms_alloc = 0.0, msckf_ms_compress = 0.0, msckf_ms_ekf = 0.0;
+long msckf_calls = 0, msckf_rows_pre = 0, msckf_cols = 0, msckf_rows_post = 0, msckf_cov = 0;
+
+namespace {
+struct SubTimer {
+    double& sink;
+    std::chrono::steady_clock::time_point start;
+    explicit SubTimer(double& target) : sink(target), start(std::chrono::steady_clock::now()) {}
+    ~SubTimer() { sink += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(); }
+};
+} // namespace
+
 void update_msckf(UpdaterMSCKFData& updater, State& state, core::Feature** feature_vec, int feature_count, const core::CameraModel* cam_models) {
     // Collect camera clones poses for triangulation
     core::ClonesCamera clones_cam = build_clones_camera(state);
@@ -271,6 +287,7 @@ void update_msckf(UpdaterMSCKFData& updater, State& state, core::Feature** featu
     int num_triangulated = 0;
     for (int i = 0; i < feature_count; ++i) {
         core::Feature* feat = feature_vec[i];
+        SubTimer tri_timer(msckf_ms_tri);
         bool success_tri = core::single_triangulation(*feat, clones_cam, updater.feat_init_options);
         bool success_refine = true;
         if (success_tri) {
@@ -292,8 +309,13 @@ void update_msckf(UpdaterMSCKFData& updater, State& state, core::Feature** featu
     }
     
     // Accumulate linear system
-    Eigen::MatrixXd Hx_big = Eigen::MatrixXd::Zero(2000, 300);
-    Eigen::VectorXd res_big = Eigen::VectorXd::Zero(2000);
+    Eigen::MatrixXd Hx_big;
+    Eigen::VectorXd res_big;
+    {
+        SubTimer alloc_timer(msckf_ms_alloc);
+        Hx_big = Eigen::MatrixXd::Zero(2000, 300);
+        res_big = Eigen::VectorXd::Zero(2000);
+    }
     int total_rows = 0;
     
     type::Variable* hx_order_big[100];
@@ -320,9 +342,12 @@ void update_msckf(UpdaterMSCKFData& updater, State& state, core::Feature** featu
         type::Variable* Hx_order[100];
         int num_Hx = 0;
         
-        get_feature_jacobian_mixed(state, *feat, cam_models, H_f, H_x, res, Hx_order, num_Hx,
-                                   state.options.feat_rep_msckf);
-        nullspace_project_inplace(H_f, H_x, res);
+        {
+            SubTimer jac_timer(msckf_ms_jac);
+            get_feature_jacobian_mixed(state, *feat, cam_models, H_f, H_x, res, Hx_order, num_Hx,
+                                       state.options.feat_rep_msckf);
+            nullspace_project_inplace(H_f, H_x, res);
+        }
         
         if (H_x.rows() == 0 || res.size() == 0) {
             feat->to_delete = true;
@@ -330,6 +355,7 @@ void update_msckf(UpdaterMSCKFData& updater, State& state, core::Feature** featu
         }
         
         // Chi-Square Check
+        SubTimer chi2_timer(msckf_ms_chi2);
         Eigen::MatrixXd P_marg = get_marginal_covariance(state, Hx_order, num_Hx);
         Eigen::MatrixXd S = H_x * P_marg * H_x.transpose();
         for (int i = 0; i < S.rows(); ++i) {
@@ -353,6 +379,7 @@ void update_msckf(UpdaterMSCKFData& updater, State& state, core::Feature** featu
         }
         
         // Add to big H
+        SubTimer assemble_timer(msckf_ms_assemble);
         int start_row = total_rows;
         int num_rows = res.size();
         
@@ -412,12 +439,17 @@ void update_msckf(UpdaterMSCKFData& updater, State& state, core::Feature** featu
     Eigen::MatrixXd Hx_valid = Hx_big.topLeftCorner(total_rows, current_col_big);
     Eigen::VectorXd res_valid = res_big.head(total_rows);
     
-    measurement_compress_inplace(Hx_valid, res_valid);
+    ++msckf_calls;
+    msckf_rows_pre += Hx_valid.rows();
+    msckf_cols += Hx_valid.cols();
+    { SubTimer compress_timer(msckf_ms_compress); measurement_compress_inplace(Hx_valid, res_valid); }
+    msckf_rows_post += Hx_valid.rows();
+    msckf_cov += state.cov_size;
 
     if (Hx_valid.rows() < updater.options.min_update_rows) return;
 
     Eigen::MatrixXd R_big = updater.options.sigma_pix_sq * Eigen::MatrixXd::Identity(res_valid.size(), res_valid.size());
-    EKFUpdate(state, hx_order_big, num_hx_order_big, Hx_valid, res_valid, R_big);
+    { SubTimer ekf_timer(msckf_ms_ekf); EKFUpdate(state, hx_order_big, num_hx_order_big, Hx_valid, res_valid, R_big); }
 }
 
 void init_updater_slam(UpdaterSLAMData& updater, const UpdaterOptions& options_slam, const UpdaterOptions& options_aruco,

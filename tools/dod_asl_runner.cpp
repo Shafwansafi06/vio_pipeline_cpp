@@ -11,6 +11,7 @@
 
 #include "../arena.hpp"
 #include "../core/tracker.hpp"
+#include "../msckf/state_helper.hpp"
 #include "../msckf/vio_manager.hpp"
 #include "euroc_options.hpp"
 
@@ -319,6 +320,20 @@ int main(int argc, char** argv) {
                      "[STAGE ms/frame] propagate %.3f  msckf %.3f  slam %.3f  slam_delayed %.3f  marg %.3f\n",
                      msckf::stage_ms_propagate / f, msckf::stage_ms_msckf / f, msckf::stage_ms_slam / f,
                      msckf::stage_ms_slam_delayed / f, msckf::stage_ms_marg / f);
+        if (msckf::msckf_calls > 0) {
+            const double c = double(msckf::msckf_calls);
+            std::fprintf(stderr,
+                         "[MSCKF sizes] calls %ld  H rows %.0f x cols %.0f  -> after compress %.0f rows  cov %.0f\n",
+                         msckf::msckf_calls, msckf::msckf_rows_pre / c, msckf::msckf_cols / c,
+                         msckf::msckf_rows_post / c, msckf::msckf_cov / c);
+        }
+        std::fprintf(stderr, "[EKF ms/frame] M_a %.3f  S+inv %.3f  K %.3f  cov-update %.3f\n",
+                     msckf::ekf_ms_ma / f, msckf::ekf_ms_s / f, msckf::ekf_ms_k / f, msckf::ekf_ms_cov / f);
+        std::fprintf(stderr,
+                     "[MSCKF ms/frame] tri %.3f  jac %.3f  chi2 %.3f  assemble %.3f  alloc %.3f  compress %.3f  ekf %.3f\n",
+                     msckf::msckf_ms_tri / f, msckf::msckf_ms_jac / f, msckf::msckf_ms_chi2 / f,
+                     msckf::msckf_ms_assemble / f, msckf::msckf_ms_alloc / f,
+                     msckf::msckf_ms_compress / f, msckf::msckf_ms_ekf / f);
     }
     std::fprintf(stderr, "[DB] full_refusals=%ld db_count=%zu slam_features=%d\n",
                  core::db_full_refusals, vio->db.count, vio->state.num_slam_features);
