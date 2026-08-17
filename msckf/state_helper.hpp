@@ -19,7 +19,7 @@ void EKFPropagation(State& state, type::Variable** order_NEW, int num_NEW,
                                
 void EKFUpdate(State& state, type::Variable** H_order, int num_H,
                           const Eigen::MatrixXd& H, const Eigen::VectorXd& res,
-                          const Eigen::MatrixXd& R);
+                          const Eigen::MatrixXd& R, Eigen::VectorXd* dx_out = nullptr);
                           
 void set_initial_covariance(State& state, const Eigen::MatrixXd& covariance,
                                        type::Variable** order, int num_order);

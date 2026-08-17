@@ -142,7 +142,7 @@ void EKFPropagation(State& state, type::Variable** order_NEW, int num_NEW,
 
 void EKFUpdate(State& state, type::Variable** H_order, int num_H,
                             const Eigen::MatrixXd& H, const Eigen::VectorXd& res,
-                            const Eigen::MatrixXd& R) {
+                            const Eigen::MatrixXd& R, Eigen::VectorXd* dx_out) {
     assert(res.size() == R.rows());
     assert(H.rows() == res.size());
 
@@ -263,6 +263,7 @@ void EKFUpdate(State& state, type::Variable** H_order, int num_H,
     Eigen::VectorXd y = res;
     llt_S.matrixL().solveInPlace(y);
     Eigen::VectorXd dx = G * y;
+    if (dx_out != nullptr) *dx_out = dx;
 
     for (int i = 0; i < state.num_variables; ++i) {
         type::Variable* var = state.variables[i];

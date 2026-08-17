@@ -44,6 +44,7 @@ set(VIO_LIB_SOURCES
     msckf/propagator.cpp
     msckf/updaters.cpp
     msckf/updater_mixed.cpp
+    msckf/updater_schur.cpp
     msckf/updater_slam_helper.cpp
     msckf/hover_detector.cpp
     msckf/vio_manager.cpp

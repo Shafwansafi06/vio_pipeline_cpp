@@ -37,6 +37,20 @@ void init_updater_msckf(UpdaterMSCKFData& updater, const UpdaterOptions& options
                         const core::FeatureInitializerOptions& feat_init_options);
 void update_msckf(UpdaterMSCKFData& updater, State& state, core::Feature** feature_vec, int feature_count, const core::CameraModel* cam_models);
 
+// SchurVINS-style alternative (msckf/updater_schur.cpp): the landmark block is
+// removed with a Schur complement on the normal equations instead of a
+// left-nullspace projection plus QR compression.
+void update_msckf_schur(UpdaterMSCKFData& updater, State& state, core::Feature** feature_vec,
+                        int feature_count, const core::CameraModel* cam_models);
+extern double schur_ms_tri, schur_ms_jac, schur_ms_chi2, schur_ms_accum,
+              schur_ms_reduce, schur_ms_ekf, schur_ms_backsub;
+extern long schur_calls, schur_dim;
+extern long schur_slam_calls, schur_slam_llt_fail, schur_slam_empty, schur_slam_landmarks;
+extern long schur_gated;
+
+core::ClonesCamera build_clones_camera(const State& state);
+double chi2_ppf_95(int dof);
+
 struct UpdaterSLAMData {
     UpdaterOptions options_slam;
     UpdaterOptions options_aruco;

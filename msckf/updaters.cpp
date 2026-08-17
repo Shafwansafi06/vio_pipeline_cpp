@@ -14,7 +14,7 @@
 
 namespace msckf {
 
-static core::ClonesCamera build_clones_camera(const State& state) {
+core::ClonesCamera build_clones_camera(const State& state) {
     core::ClonesCamera clones_cam;
     clones_cam.num_clones = state.num_clones;
     for (int c = 0; c < state.num_clones; ++c) {
@@ -45,7 +45,7 @@ long anchor_marg_transform = 0;
 long anchor_change_ok = 0;
 long dinit_seen = 0, dinit_skip_cap = 0, dinit_skip_meas = 0, dinit_skip_tri = 0, dinit_ok = 0;
 
-static double chi2_ppf_95(int dof) {
+double chi2_ppf_95(int dof) {
     if (dof <= 0) return 0.0;
     if (dof < CHI2_TABLE_SIZE) return CHI2_TABLE_95[dof];
     // ponytail: dof >= 500 is unreachable here -- residual rows are bounded by

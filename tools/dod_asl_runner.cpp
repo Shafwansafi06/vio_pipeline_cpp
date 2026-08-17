@@ -113,6 +113,10 @@ int main(int argc, char** argv) {
     };
     msckf::VioManagerOptions options = make_euroc_options();
     options.enable_slam = env_int("VIO_ENABLE_SLAM", options.enable_slam ? 1 : 0) != 0;
+    options.use_schur_msckf = env_int("VIO_SCHUR", options.use_schur_msckf ? 1 : 0) != 0;
+    options.state_opt.do_fej = env_int("VIO_FEJ", options.state_opt.do_fej ? 1 : 0) != 0;
+    options.state_opt.do_calib_camera_intrinsics =
+        env_int("VIO_CALIB_INTR", options.state_opt.do_calib_camera_intrinsics ? 1 : 0) != 0;
     options.state_opt.max_msckf_in_update = env_int("VIO_MAX_MSCKF", options.state_opt.max_msckf_in_update);
     options.state_opt.max_slam_features = env_int("VIO_MAX_SLAM", options.state_opt.max_slam_features);
     options.state_opt.max_slam_in_update =

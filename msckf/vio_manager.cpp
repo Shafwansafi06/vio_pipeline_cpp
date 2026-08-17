@@ -269,7 +269,16 @@ void feed_measurement_camera_tracks(VioManagerData& vio, double timestamp, const
                 msckf_used = msckf_features + (msckf_count - msckf_cap);
                 msckf_used_count = msckf_cap;
             }
-            { StageTimer stage_timer(msckf::stage_ms_msckf); update_msckf(vio.updater_msckf, vio.state, msckf_used, msckf_used_count, vio.params.cam_models); }
+            {
+                StageTimer stage_timer(msckf::stage_ms_msckf);
+                if (vio.params.use_schur_msckf) {
+                    update_msckf_schur(vio.updater_msckf, vio.state, msckf_used, msckf_used_count,
+                                       vio.params.cam_models);
+                } else {
+                    update_msckf(vio.updater_msckf, vio.state, msckf_used, msckf_used_count,
+                                 vio.params.cam_models);
+                }
+            }
             core::cleanup_db(vio.db);
         }
 
