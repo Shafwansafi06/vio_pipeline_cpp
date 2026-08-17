@@ -39,6 +39,10 @@ int main(int argc, char** argv) {
         return 2;
     }
     const double max_seconds = argc > 3 ? std::atof(argv[3]) : -1.0;
+    // Skip the first N seconds of the bag, matching official's `bag_start`
+    // (their launch defaults it to 40 for MH_01). Needed so a wall-clock
+    // comparison against OpenVINS or ov_SchurVINS covers the same work.
+    const double bag_start = argc > 4 ? std::atof(argv[4]) : 0.0;
     char estimate_path[1024];
     char truth_path[1024];
     char timing_path[1024];
@@ -92,6 +96,7 @@ int main(int argc, char** argv) {
         const double message_time = message.getTime().toSec();
         if (first_timestamp < 0.0) first_timestamp = message_time;
         if (max_seconds > 0.0 && message_time - first_timestamp > max_seconds) break;
+        if (bag_start > 0.0 && message_time - first_timestamp < bag_start) continue;
         const std::string topic = message.getTopic();
         if (topic == kImuTopic) {
             const sensor_msgs::ImuConstPtr imu = message.instantiate<sensor_msgs::Imu>();

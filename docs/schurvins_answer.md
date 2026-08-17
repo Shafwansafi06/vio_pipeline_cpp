@@ -116,3 +116,56 @@ Where we ended up relative to the paper's actual goal -- a lightweight,
 fast filter -- is: **4.15 ms/frame, 1.94x faster than official OpenVINS
 end-to-end**, reached by making the conventional path cheap rather than by
 changing the estimator.
+
+---
+
+## 6. Head-to-head against the authors' own implementation (2026-08-17)
+
+We built `ov_SchurVINS` (their released code, a fork of OpenVINS) in
+`ros_container_v2` and ran all three systems on the same bag, same machine, same
+evaluator. SchurVINS does not support dynamic initialisation, so all three use
+its intended protocol: `bag_start 40`, static init -- the same 40 s skip their
+own launch file defaults to for MH_01.
+
+### Wall clock, same transport (hyperfine, 5 runs)
+
+| | mean | sigma | |
+|---|---|---|---|
+| **DOD (ours)** | **10.752 s** | 0.013 | |
+| ov_SchurVINS | 21.146 s | 0.193 | we are **1.97x faster** |
+| OpenVINS | 23.247 s | 0.083 | we are **2.16x faster** |
+
+Whole process, identical bag through each system's own bag reader.
+
+### Per-frame, internal timers (same segment)
+
+| | ATE | tracking | estimator | total |
+|---|---|---|---|---|
+| **DOD (ours)** | 0.1431 | **1.546** | **2.089** | **3.635 ms** |
+| ov_SchurVINS | **0.1365** | 2.113 | 4.399 | 6.512 ms |
+| OpenVINS | 0.1476 | 2.116 | 5.136 | 7.252 ms |
+
+**The estimator -- the part SchurVINS is about -- is 2.11x faster in ours**
+(2.089 vs 4.399 ms), reached without their Schur reduction, by making the
+conventional path cheap.
+
+### On "running what they already have in the frontend"
+
+Their frontend *is* OpenVINS's TrackKLT: 2.113 ms/frame, against 1.546 ms for
+ours doing the same job (§Benchmark 14 measured our tracker's quality as equal
+or better on lifetime, parallax and epipolar residual). Adopting their frontend
+verbatim and keeping our back end would give 2.113 + 2.089 = **4.202 ms**, still
+**1.55x faster** than their 6.512 -- so the result is not a frontend artefact.
+
+### The honest caveat
+
+**They are more accurate on this segment: 0.1365 vs our 0.1431, a 4.8% gap.**
+Both beat OpenVINS (0.1476). So the trade is real and it is theirs to claim on
+accuracy; ours is the speed claim. Note also that this is the ov_SchurVINS port
+on an OpenVINS frontend, not the paper's SVO2.0 system, whose 0.075 m mean is
+not comparable to any number here.
+
+### Conclusion
+
+Yes -- faster than SchurVINS, by ~2x end to end and 2.1x in the estimator, at
+4.8% more error, on their own protocol and their own implementation.
