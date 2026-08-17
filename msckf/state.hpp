@@ -4,7 +4,14 @@
 
 namespace msckf {
 
-constexpr int STATE_COV_CAPACITY = 512;
+// Worst case the code can actually reach: IMU 15 + dt 1 + 2 camera extrinsics
+// (6 each) + 2 intrinsics (8 each) + IMU intrinsics 27 + 20 clones (6 each) +
+// 50 SLAM landmarks (3 each) = 341. 512 was headroom nobody needed, and it is
+// not free: state.Cov is a fixed-size matrix, so every block operation strides
+// by the CAPACITY, not by the live state size. At 240 live dims that wasted
+// over half of every cache line fetched, on a 2 MB matrix. init_state()
+// validates the configured maximum against this at runtime.
+constexpr int STATE_COV_CAPACITY = 384;
 constexpr int IMU_ERROR_STATE_CAPACITY = 39;
 
 enum class IntegrationMethod {

@@ -1,4 +1,7 @@
 #include "state.hpp"
+
+#include <cstdio>
+#include <cstdlib>
 #include <cassert>
 
 namespace msckf {
@@ -9,6 +12,20 @@ void init_state(State& state, const StateOptions& options) {
     // than fits used to run straight off the end of the array (max_slam = 100
     // segfaults mid-sequence); clamp instead so an over-large config costs
     // landmarks, not memory corruption.
+    // The covariance is fixed-capacity; a config that could outgrow it must fail
+    // loudly here rather than corrupt memory later (the asserts below compile
+    // out under NDEBUG, which Release defines).
+    {
+        const int worst_case = 15 + 1 + 2 * 6 + 2 * 8 + 27 +
+                               6 * int(sizeof(state.clones_IMU) / sizeof(state.clones_IMU[0])) +
+                               3 * int(sizeof(state.features_SLAM) / sizeof(state.features_SLAM[0]));
+        if (worst_case > STATE_COV_CAPACITY) {
+            std::fprintf(stderr,
+                         "init_state: STATE_COV_CAPACITY=%d cannot hold worst-case state %d\n",
+                         STATE_COV_CAPACITY, worst_case);
+            std::exit(1);
+        }
+    }
     const int slam_capacity = int(sizeof(state.features_SLAM) / sizeof(state.features_SLAM[0]));
     const int clone_capacity = int(sizeof(state.clones_IMU) / sizeof(state.clones_IMU[0]));
     if (state.options.max_slam_features > slam_capacity) state.options.max_slam_features = slam_capacity;

@@ -171,16 +171,24 @@ void EKFUpdate(State& state, type::Variable** H_order, int num_H,
         current_it += H_order[i]->size;
     }
 
-    // M_a = P * H^T, accumulated one MEASUREMENT variable at a time over the
-    // full column of the covariance. Official loops over every state variable
-    // and, inside that, over every measurement variable -- mathematically the
-    // same sum, but ~65 x 13 tiny GEMMs (each with its own heap-allocated M_i)
-    // instead of ~13 tall ones. Same arithmetic, same result, far fewer calls.
+    // M_a = P * H^T in ONE gemm.
+    //
+    // H is already contiguous: its columns are laid out in H_order sequence. The
+    // covariance columns for those same variables are not, so gather them once
+    // into P_gathered (total_size x current_it) and do a single
+    // (N x c)*(c x m) product. Accumulating variable by variable instead is the
+    // same arithmetic in ~13 skinny GEMMs with k = 6, which run far below peak;
+    // the gather is 20k element copies against a 1.4 MFLOP product.
+    static thread_local Eigen::MatrixXd P_gathered;
+    if (P_gathered.rows() != total_size || P_gathered.cols() != current_it) {
+        P_gathered.resize(total_size, current_it);
+    }
     for (int k = 0; k < num_H; ++k) {
         type::Variable* meas_var = H_order[k];
-        M_a.noalias() += state.Cov.block(0, meas_var->id, total_size, meas_var->size) *
-                         H.block(0, H_id[k], H.rows(), meas_var->size).transpose();
+        P_gathered.block(0, H_id[k], total_size, meas_var->size) =
+            state.Cov.block(0, meas_var->id, total_size, meas_var->size);
     }
+    M_a.noalias() = P_gathered * H.transpose();
 
     const auto ekf_t1 = std::chrono::steady_clock::now();
     // S = H P H^T + R. The rows of M_a belonging to the measurement variables
@@ -194,13 +202,31 @@ void EKFUpdate(State& state, type::Variable** H_order, int num_H,
                        M_a.block(meas_var->id, 0, meas_var->size, res.size());
     }
     S.triangularView<Eigen::Upper>() += R;
-    Eigen::MatrixXd Sinv = Eigen::MatrixXd::Identity(R.rows(), R.rows());
-    S.selfadjointView<Eigen::Upper>().llt().solveInPlace(Sinv);
+    // Square-root form. S = L L^T, and with G := M_a L^-T:
+    //
+    //     K M_a^T = M_a S^-1 M_a^T = (M_a L^-T)(M_a L^-T)^T = G G^T
+    //     dx      = M_a S^-1 res   = G (L^-1 res)
+    //
+    // so the explicit inverse (an m^3 solve against the identity) and the
+    // separate K = M_a S^-1 product both disappear, and the covariance update
+    // becomes a symmetric rank-k update instead of a general product. This is
+    // the square-root-factor idea from sqrtVINS (Peng et al., T-RO 2025)
+    // applied to the covariance form: never invert what you can factor.
+    Eigen::LLT<Eigen::MatrixXd> llt_S(S.selfadjointView<Eigen::Upper>());
+    if (llt_S.info() != Eigen::Success) {
+        ++ekf_negative_diagonal_count;
+        return;
+    }
     const auto ekf_t2 = std::chrono::steady_clock::now();
-    Eigen::MatrixXd K = M_a * Sinv.selfadjointView<Eigen::Upper>();
+    Eigen::MatrixXd G = M_a;
+    llt_S.matrixU().solveInPlace<Eigen::OnTheRight>(G);
     const auto ekf_t3 = std::chrono::steady_clock::now();
 
-    state.Cov.block(0, 0, total_size, total_size).triangularView<Eigen::Upper>() -= K * M_a.transpose();
+    // G G^T is symmetric by construction, so a rank-k update on the upper
+    // triangle replaces the general product AND removes the floating-point
+    // asymmetry that made the dense `Cov -= K * M_a^T` form drive diagonals
+    // negative.
+    state.Cov.block(0, 0, total_size, total_size).selfadjointView<Eigen::Upper>().rankUpdate(G, -1.0);
     // Mirror the upper triangle into the lower one column by column. The
     // previous `Cov.block(...) = Cov.block(...).selfadjointView<Upper>()` is a
     // self-assignment Eigen has to evaluate through a full N x N temporary,
@@ -234,7 +260,9 @@ void EKFUpdate(State& state, type::Variable** H_order, int num_H,
         }
     }
 
-    Eigen::VectorXd dx = K * res;
+    Eigen::VectorXd y = res;
+    llt_S.matrixL().solveInPlace(y);
+    Eigen::VectorXd dx = G * y;
 
     for (int i = 0; i < state.num_variables; ++i) {
         type::Variable* var = state.variables[i];

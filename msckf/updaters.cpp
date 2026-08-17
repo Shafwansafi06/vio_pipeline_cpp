@@ -380,24 +380,31 @@ void update_msckf(UpdaterMSCKFData& updater, State& state, core::Feature** featu
         // res . S.llt().solve(res). What was here additionally formed
         // 0.5*(S + S^T) -- a full temporary of a matrix that is already
         // symmetric by construction -- and solved with an LDLT.
-        // Gather the marginal covariance into a reused buffer. Building S block
-        // by block instead (avoiding the gather entirely) was tried and is
-        // SLOWER here -- 0.285 -> 0.404 ms/frame -- because it turns two dense
-        // products into ~13x13 small ones per feature. The gather wins; only its
-        // allocation is worth removing.
-        static thread_local Eigen::MatrixXd P_marg;
-        get_marginal_covariance_into(state, Hx_order, num_Hx, P_marg);
-        Eigen::MatrixXd S = H_x * P_marg * H_x.transpose();
-        S.diagonal().array() += updater.options.sigma_pix_sq;
+        const double chi2_check = chi2_ppf_95(int(res.size()));
+        const double chi2_limit = updater.options.chi2_multipler * chi2_check;
 
-        double chi2 = 99999.0;
-        Eigen::LLT<Eigen::MatrixXd> solver(S);
-        if (solver.info() == Eigen::Success) {
-            chi2 = res.dot(solver.solve(res));
+        // Exact early accept. S = H P H^T + sigma^2 I is positive definite with
+        // S >= sigma^2 I, hence S^-1 <= I/sigma^2 and
+        //     chi2 = res^T S^-1 res <= res^T res / sigma^2.
+        // If that upper bound already clears the threshold the feature cannot
+        // fail the real test, so the marginal-covariance gather, the two dense
+        // products and the Cholesky can all be skipped. The decision is
+        // identical, not approximate -- clean inliers, which are most features,
+        // take this path.
+        double chi2 = res.squaredNorm() / updater.options.sigma_pix_sq;
+        if (chi2 > chi2_limit) {
+            static thread_local Eigen::MatrixXd P_marg;
+            get_marginal_covariance_into(state, Hx_order, num_Hx, P_marg);
+            Eigen::MatrixXd S = H_x * P_marg * H_x.transpose();
+            S.diagonal().array() += updater.options.sigma_pix_sq;
+            chi2 = 99999.0;
+            Eigen::LLT<Eigen::MatrixXd> solver(S);
+            if (solver.info() == Eigen::Success) {
+                chi2 = res.dot(solver.solve(res));
+            }
         }
-        
-        double chi2_check = chi2_ppf_95(res.size());
-        if (chi2 > updater.options.chi2_multipler * chi2_check) {
+
+        if (chi2 > chi2_limit) {
             feat->to_delete = true;
 #ifdef DOD_MSCKF_ACCEPT_DEBUG
             ++dbg_rej_chi2;
@@ -634,12 +641,21 @@ void update_slam(UpdaterSLAMData& updater, State& state, core::Feature** feature
         // Official: S = H_xf P H_xf^T, S.diagonal() += sigma_pix_sq, then
         // res.dot(S.llt().solve(res)). No symmetrisation, and an LLT rather
         // than an LDLT -- both were additions here.
-        Eigen::MatrixXd P_marg = get_marginal_covariance(state, Hxf_order, num_Hxf);
-        Eigen::MatrixXd S = H_xf * P_marg * H_xf.transpose();
-        S.diagonal() += updater.options_slam.sigma_pix_sq * Eigen::VectorXd::Ones(S.rows());
-        double chi2 = res.dot(S.llt().solve(res));
-        const double chi2_check = chi2_ppf_95(static_cast<int>(res.size()));
-        if (chi2 > updater.options_slam.chi2_multipler * chi2_check) {
+        // Exact early accept, same bound as the MSCKF gate: S >= sigma^2 I, so
+        // chi2 <= res^T res / sigma^2. When the bound clears the threshold the
+        // gather, the two dense products and the Cholesky are all skippable and
+        // the decision is unchanged.
+        const double chi2_limit_slam =
+            updater.options_slam.chi2_multipler * chi2_ppf_95(int(res.size()));
+        double chi2 = res.squaredNorm() / updater.options_slam.sigma_pix_sq;
+        if (chi2 > chi2_limit_slam) {
+            static thread_local Eigen::MatrixXd P_marg;
+            get_marginal_covariance_into(state, Hxf_order, num_Hxf, P_marg);
+            Eigen::MatrixXd S = H_xf * P_marg * H_xf.transpose();
+            S.diagonal().array() += updater.options_slam.sigma_pix_sq;
+            chi2 = res.dot(S.llt().solve(res));
+        }
+        if (chi2 > chi2_limit_slam) {
             landmark->update_fail_count++;
             continue;
         }

@@ -115,6 +115,8 @@ int main(int argc, char** argv) {
     options.enable_slam = env_int("VIO_ENABLE_SLAM", options.enable_slam ? 1 : 0) != 0;
     options.state_opt.max_msckf_in_update = env_int("VIO_MAX_MSCKF", options.state_opt.max_msckf_in_update);
     options.state_opt.max_slam_features = env_int("VIO_MAX_SLAM", options.state_opt.max_slam_features);
+    options.state_opt.max_slam_in_update =
+        env_int("VIO_SLAM_BATCH", options.state_opt.max_slam_in_update);
     options.state_opt.do_calib_camera_pose =
         env_int("VIO_CALIB_EXTRINSICS", options.state_opt.do_calib_camera_pose ? 1 : 0) != 0;
     options.state_opt.do_calib_camera_timeoffset =
