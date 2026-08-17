@@ -16,7 +16,8 @@ extern long cls_retire_untracked, cls_retire_chi2;
 
 // Per-stage accumulated wall time (ms), mirroring official OpenVINS's
 // record_timing_information columns so the two can be compared stage by stage.
-extern double stage_ms_propagate, stage_ms_msckf, stage_ms_slam, stage_ms_slam_delayed, stage_ms_marg;
+extern double stage_ms_propagate, stage_ms_msckf, stage_ms_slam, stage_ms_slam_delayed, stage_ms_marg,
+              stage_ms_db, stage_ms_classify;
 
 struct VioManagerOptions {
     double gravity_mag = 9.81;

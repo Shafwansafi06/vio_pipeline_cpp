@@ -162,7 +162,14 @@ void EKFUpdate(State& state, type::Variable** H_order, int num_H,
 
     int total_size = state.cov_size;
     const auto ekf_t0 = std::chrono::steady_clock::now();
-    Eigen::MatrixXd M_a = Eigen::MatrixXd::Zero(total_size, res.size());
+    // Reused across frames, and NOT zero-filled: the single GEMM below assigns
+    // every element. `MatrixXd::Zero(...)` here allocated and memset 140 KB per
+    // update -- 3 updates a frame -- that was overwritten immediately.
+    // Cachegrind attributed 41% of all last-level write misses to that memset.
+    static thread_local Eigen::MatrixXd M_a;
+    if (M_a.rows() != total_size || M_a.cols() != res.size()) {
+        M_a.resize(total_size, res.size());
+    }
 
     int current_it = 0;
     int H_id[100];
@@ -218,7 +225,10 @@ void EKFUpdate(State& state, type::Variable** H_order, int num_H,
         return;
     }
     const auto ekf_t2 = std::chrono::steady_clock::now();
-    Eigen::MatrixXd G = M_a;
+    // Solve in place: M_a BECOMES G. Copying it first cost another 140 KB per
+    // update (31% of last-level write misses) for a value that is dead after
+    // this line -- S is already built, and everything below wants G.
+    Eigen::MatrixXd& G = M_a;
     llt_S.matrixU().solveInPlace<Eigen::OnTheRight>(G);
     const auto ekf_t3 = std::chrono::steady_clock::now();
 

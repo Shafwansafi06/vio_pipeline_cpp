@@ -452,7 +452,7 @@ bool featureless_initialize(const InitializerOptions& config,
     (void)num_cameras;
     double newest_cam_time = -1.0;
     for (int f = 0; f < (int)db.count; ++f) {
-        const core::Feature& feat = db.features[f];
+        const core::Feature& feat = core::feature_at(db, f);
         for (int m = 0; m < feat.num_measurements; ++m) {
             newest_cam_time = std::max(newest_cam_time, feat.measurements[m].timestamp);
         }
@@ -465,7 +465,7 @@ bool featureless_initialize(const InitializerOptions& config,
         std::map<double, bool> unique_times;
         const double oldest_allowed = newest_cam_time - config.init_window_time;
         for (int f = 0; f < (int)db.count; ++f) {
-            const core::Feature& feat = db.features[f];
+            const core::Feature& feat = core::feature_at(db, f);
             for (int m = 0; m < feat.num_measurements; ++m) {
                 const double t = feat.measurements[m].timestamp;
                 if (t >= oldest_allowed) unique_times[t] = true;
@@ -539,7 +539,7 @@ bool featureless_initialize(const InitializerOptions& config,
             Eigen::Matrix3d M = Eigen::Matrix3d::Zero();
             int shared = 0;
             for (int f = 0; f < (int)db.count; ++f) {
-                const core::Feature& feat = db.features[f];
+                const core::Feature& feat = core::feature_at(db, f);
                 const Eigen::Vector2d* uv_i = nullptr;
                 const Eigen::Vector2d* uv_j = nullptr;
                 for (int m = 0; m < feat.num_measurements; ++m) {
@@ -702,7 +702,7 @@ bool dynamic_initialize(const InitializerOptions& config,
     // Newest / oldest camera time across all features in the DB.
     double newest_cam_time = -1.0;
     for (int f = 0; f < (int)db.count; ++f) {
-        const core::Feature& feat = db.features[f];
+        const core::Feature& feat = core::feature_at(db, f);
         for (int m = 0; m < feat.num_measurements; ++m) {
             newest_cam_time = std::max(newest_cam_time, feat.measurements[m].timestamp);
         }
@@ -720,7 +720,7 @@ bool dynamic_initialize(const InitializerOptions& config,
     // Require enough features in the window.
     int valid_db = 0;
     for (int f = 0; f < (int)db.count; ++f)
-        if (db.features[f].num_measurements > 0) ++valid_db;
+        if (core::feature_at(db, f).num_measurements > 0) ++valid_db;
     if (valid_db < 0.75 * config.init_max_features) return false;
 
     const int min_num_meas_to_optimize = (int)config.init_window_time;
@@ -741,7 +741,7 @@ bool dynamic_initialize(const InitializerOptions& config,
         // initializer on a separate, bounded feature set sized by
         // init_max_features; this is the same bound applied directly.
         if (count_valid_features >= config.init_max_features) break;
-        const core::Feature& feat = db.features[f];
+        const core::Feature& feat = core::feature_at(db, f);
         std::vector<double> times;
         for (int m = 0; m < feat.num_measurements; ++m) {
             double time = feat.measurements[m].timestamp;
@@ -814,7 +814,7 @@ bool dynamic_initialize(const InitializerOptions& config,
     for (int f = 0; f < (int)db.count; ++f) {
         if (feat_num_meas[f] < min_num_meas_to_optimize) continue;
         A_index_features[f] = idx_feat++;
-        const core::Feature& feat = db.features[f];
+        const core::Feature& feat = core::feature_at(db, f);
         for (int m = 0; m < feat.num_measurements; ++m)
             if (map_camera_times.count(feat.measurements[m].timestamp)) num_rows += 2;
     }
@@ -825,7 +825,7 @@ bool dynamic_initialize(const InitializerOptions& config,
     int index_meas = 0;
     for (int f = 0; f < (int)db.count; ++f) {
         if (feat_num_meas[f] < min_num_meas_to_optimize) continue;
-        const core::Feature& feat = db.features[f];
+        const core::Feature& feat = core::feature_at(db, f);
         for (int m = 0; m < feat.num_measurements; ++m) {
             const core::FeatureMeasurement& obs = feat.measurements[m];
             double time = obs.timestamp;
@@ -1063,7 +1063,7 @@ bool run_initialization(const InitializerOptions& config,
                         bool wait_for_jerk) {
     double newest_time = -1.0;
     for (int i = 0; i < (int)db.count; ++i) {
-        const core::Feature& feat = db.features[i];
+        const core::Feature& feat = core::feature_at(db, i);
         for (int m = 0; m < feat.num_measurements; ++m) {
             if (feat.measurements[m].timestamp > newest_time) {
                 newest_time = feat.measurements[m].timestamp;

@@ -12,17 +12,22 @@ long cls_frames = 0, cls_lost = 0, cls_marginal = 0, cls_maxtrack = 0;
 long cls_slam_update = 0, cls_db_count = 0;
 long cls_retire_untracked = 0, cls_retire_chi2 = 0;
 double stage_ms_propagate = 0.0, stage_ms_msckf = 0.0, stage_ms_slam = 0.0,
-       stage_ms_slam_delayed = 0.0, stage_ms_marg = 0.0;
+       stage_ms_slam_delayed = 0.0, stage_ms_marg = 0.0, stage_ms_db = 0.0,
+       stage_ms_classify = 0.0;
 
 namespace {
 // Accumulates the wall time of the scope it is declared in.
 struct StageTimer {
-    double& sink;
+    double* sink;
     std::chrono::steady_clock::time_point start;
-    explicit StageTimer(double& target) : sink(target), start(std::chrono::steady_clock::now()) {}
-    ~StageTimer() {
-        sink += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    explicit StageTimer(double& target) : sink(&target), start(std::chrono::steady_clock::now()) {}
+    void stop() {
+        if (sink != nullptr) {
+            *sink += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+            sink = nullptr;
+        }
     }
+    ~StageTimer() { stop(); }
 };
 } // namespace
 
@@ -73,6 +78,7 @@ void feed_measurement_imu(VioManagerData& vio, const core::ImuData& message) {
 
 void feed_measurement_camera_tracks(VioManagerData& vio, double timestamp, const core::Feature* tracks, int track_count) {
     // 1. Update feature database
+    StageTimer db_timer(msckf::stage_ms_db);
     for (int i = 0; i < track_count; ++i) {
         const core::Feature& tr = tracks[i];
         for (int m = 0; m < tr.num_measurements; ++m) {
@@ -83,6 +89,8 @@ void feed_measurement_camera_tracks(VioManagerData& vio, double timestamp, const
         }
     }
     
+    db_timer.stop();
+
     // 2. Try to initialize if not yet initialized
     if (!vio.is_initialized) {
         try_to_initialize(vio);
@@ -147,7 +155,7 @@ void feed_measurement_camera_tracks(VioManagerData& vio, double timestamp, const
             : margtimestep(vio.state);
 
         for (int i = 0; i < (int)vio.db.count; ++i) {
-            core::Feature& feat = vio.db.features[i];
+            core::Feature& feat = core::feature_at(vio.db, i);
             bool is_lost = true;
             bool contains_marginal = false;
             for (int m = 0; m < feat.num_measurements; ++m) {

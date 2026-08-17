@@ -16,7 +16,7 @@ bool update_hover_detector(HoverDetectorData& detector, const core::FeatureDatab
     double sum_residual = 0.0;
 
     for (std::size_t i = 0; i < db.count; ++i) {
-        const core::Feature& feat = db.features[i];
+        const core::Feature& feat = core::feature_at(db, i);
         const core::FeatureMeasurement* prev_meas = nullptr;
         const core::FeatureMeasurement* curr_meas = nullptr;
         for (int m = 0; m < feat.num_measurements; ++m) {

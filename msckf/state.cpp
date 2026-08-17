@@ -1,5 +1,7 @@
 #include "state.hpp"
 
+#include "../core/feature.hpp"
+
 #include <cstdio>
 #include <cstdlib>
 #include <cassert>
@@ -25,6 +27,13 @@ void init_state(State& state, const StateOptions& options) {
                          STATE_COV_CAPACITY, worst_case);
             std::exit(1);
         }
+    }
+    if (state.options.max_clone_size > core::FEATURE_MAX_CLONES_SUPPORTED) {
+        std::fprintf(stderr,
+                     "init_state: max_clone_size=%d exceeds FEATURE_MAX_CLONES_SUPPORTED=%d; "
+                     "a feature could not hold all its measurements and they would be dropped\n",
+                     state.options.max_clone_size, core::FEATURE_MAX_CLONES_SUPPORTED);
+        std::exit(1);
     }
     const int slam_capacity = int(sizeof(state.features_SLAM) / sizeof(state.features_SLAM[0]));
     const int clone_capacity = int(sizeof(state.clones_IMU) / sizeof(state.clones_IMU[0]));

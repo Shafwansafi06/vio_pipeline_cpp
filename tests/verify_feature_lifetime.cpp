@@ -11,7 +11,7 @@ namespace {
 
 bool sorted_and_consistent(const core::FeatureDatabase& db, const char* stage) {
     for (std::size_t i = 1; i < db.count; ++i) {
-        if (db.features[i].featid <= db.features[i - 1].featid) {
+        if (core::feature_at(db, i).featid <= core::feature_at(db, i - 1).featid) {
             std::cerr << stage << ": features[] not strictly sorted by featid at index " << i << "\n";
             return false;
         }
@@ -19,7 +19,7 @@ bool sorted_and_consistent(const core::FeatureDatabase& db, const char* stage) {
     // Every stored id must resolve to itself via the same lookup path used by
     // the estimator (find_feature_index / get_feature).
     for (std::size_t i = 0; i < db.count; ++i) {
-        const int featid = db.features[i].featid;
+        const int featid = core::feature_at(db, i).featid;
         const int found = core::find_feature_index(db, featid);
         if (found != static_cast<int>(i)) {
             std::cerr << stage << ": find_feature_index(" << featid << ") returned " << found

@@ -324,8 +324,8 @@ int main(int argc, char** argv) {
     if (frames > 0) {
         const double f = double(frames);
         std::fprintf(stderr,
-                     "[STAGE ms/frame] propagate %.3f  msckf %.3f  slam %.3f  slam_delayed %.3f  marg %.3f\n",
-                     msckf::stage_ms_propagate / f, msckf::stage_ms_msckf / f, msckf::stage_ms_slam / f,
+                     "[STAGE ms/frame] db %.3f  propagate %.3f  msckf %.3f  slam %.3f  slam_delayed %.3f  marg %.3f\n",
+                     msckf::stage_ms_db / f, msckf::stage_ms_propagate / f, msckf::stage_ms_msckf / f, msckf::stage_ms_slam / f,
                      msckf::stage_ms_slam_delayed / f, msckf::stage_ms_marg / f);
         if (msckf::msckf_calls > 0) {
             const double c = double(msckf::msckf_calls);
@@ -342,6 +342,10 @@ int main(int argc, char** argv) {
                      msckf::msckf_ms_assemble / f, msckf::msckf_ms_alloc / f,
                      msckf::msckf_ms_compress / f, msckf::msckf_ms_ekf / f);
     }
+    std::fprintf(stderr, "[DBG] max_meas=%ld max_count=%ld shift_elems/frame=%.0f compact_elems/frame=%.0f\n",
+                 core::dbg_max_meas, core::dbg_max_count,
+                 double(core::dbg_shift_elems) / double(frames ? frames : 1),
+                 double(core::dbg_compact_elems) / double(frames ? frames : 1));
     std::fprintf(stderr, "[DB] full_refusals=%ld db_count=%zu slam_features=%d\n",
                  core::db_full_refusals, vio->db.count, vio->state.num_slam_features);
     return vio->is_initialized ? 0 : 8;

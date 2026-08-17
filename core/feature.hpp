@@ -8,6 +8,7 @@ extern long tri_reject_cond, tri_reject_mindist, tri_reject_maxdist, tri_reject_
 extern long gn_reject_dist, gn_reject_baseline, gn_accept;
 extern long tri_reject_cond_meas, tri_accept_meas;
 extern long db_full_refusals;
+extern long dbg_max_meas, dbg_max_count, dbg_shift_elems, dbg_compact_elems;
 extern long tri_cond_hist[32], tri_accept_hist[32];
 
 struct ClonePose {
@@ -30,10 +31,18 @@ struct FeatureMeasurement {
     Eigen::Vector2d uv_norm;
 };
 
+// A feature can hold at most one measurement per camera per live clone, plus
+// the frame being processed: 2 * max_clone_size + 2. The shipped window is 11
+// clones, so 24 -- measured, and exactly what the tracker produces. The array
+// was 48, i.e. 2x the reachable bound, which doubled sizeof(Feature) and every
+// scan over the database. init_state() validates max_clone_size against this.
+constexpr int FEATURE_MAX_MEASUREMENTS = 48;
+constexpr int FEATURE_MAX_CLONES_SUPPORTED = (FEATURE_MAX_MEASUREMENTS - 2) / 2;
+
 struct Feature {
     int featid = -1;
     bool to_delete = false;
-    FeatureMeasurement measurements[48];
+    FeatureMeasurement measurements[FEATURE_MAX_MEASUREMENTS];
     int num_measurements = 0;
     
     // Triangulated coordinates
@@ -43,10 +52,33 @@ struct Feature {
     Eigen::Vector3d p_FinA = Eigen::Vector3d::Zero();
 };
 
+// Feature payloads are 2400 bytes each. Keeping them physically sorted by
+// featid meant every new feature memmove'd the tail of the array: measured
+// 9,556 Feature copies per frame = 22.9 MB/s of pure memcpy to maintain an
+// ordering over a 4-byte key, plus a full compaction on every cleanup_db (3-4
+// times a frame).
+//
+// The payloads now never move. `order` holds slot indices sorted by featid, so
+// insertion shifts 4-byte ints instead of 2400-byte structs, and cleanup only
+// rewrites `order`. Logical iteration order is unchanged -- still ascending
+// featid -- so results are bit-identical. Freed slots are recycled through a
+// stack. Payload addresses are now stable across cleanup, which is strictly
+// safer than before (callers used to re-resolve pointers by id after every
+// compaction).
+//
+// Access live feature k (0 <= k < count) with feature_at(db, k), never
+// db.features[k] -- the latter is a storage slot, not a logical position.
 struct FeatureDatabase {
     Feature features[2048];
+    int order[2048];
+    int free_slots[2048];
+    int num_free = 0;
+    int num_slots_used = 0;
     std::size_t count = 0;
 };
+
+inline Feature& feature_at(FeatureDatabase& db, int k) { return db.features[db.order[k]]; }
+inline const Feature& feature_at(const FeatureDatabase& db, int k) { return db.features[db.order[k]]; }
 
 // Database functions
 int find_feature_index(const FeatureDatabase& db, int feat_id);

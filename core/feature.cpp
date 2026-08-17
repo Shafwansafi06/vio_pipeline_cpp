@@ -7,6 +7,8 @@
 
 namespace core {
 
+long dbg_max_meas = 0, dbg_max_count = 0, dbg_shift_elems = 0, dbg_compact_elems = 0;
+
 // Triangulation rejection counters (see single_triangulation). Reported by the
 // runners; zero-cost to leave in, and the alternative is guessing.
 long tri_reject_cond = 0;
@@ -46,9 +48,10 @@ int find_feature_index(const FeatureDatabase& db, int feat_id) {
     int high = (int)db.count - 1;
     while (low <= high) {
         int mid = low + (high - low) / 2;
-        if (db.features[mid].featid == feat_id) {
+        const int mid_id = db.features[db.order[mid]].featid;
+        if (mid_id == feat_id) {
             return mid;
-        } else if (db.features[mid].featid < feat_id) {
+        } else if (mid_id < feat_id) {
             low = mid + 1;
         } else {
             high = mid - 1;
@@ -60,7 +63,7 @@ int find_feature_index(const FeatureDatabase& db, int feat_id) {
 Feature* get_feature(FeatureDatabase& db, int feat_id) {
     int idx = find_feature_index(db, feat_id);
     if (idx != -1) {
-        return &db.features[idx];
+        return &feature_at(db, idx);
     }
     return nullptr;
 }
@@ -70,16 +73,17 @@ bool get_feature_clone(const FeatureDatabase& db, int feat_id, Feature& feat_out
     if (idx == -1) {
         return false;
     }
-    feat_out = db.features[idx];
+    feat_out = feature_at(db, idx);
     return true;
 }
 
 void update_feature(FeatureDatabase& db, int feat_id, double timestamp, int cam_id, double u, double v, double u_n, double v_n) {
     int idx = find_feature_index(db, feat_id);
     if (idx != -1) {
-        Feature& feat = db.features[idx];
-        if (feat.num_measurements < 48) {
+        Feature& feat = feature_at(db, idx);
+        if (feat.num_measurements < FEATURE_MAX_MEASUREMENTS) {
             feat.measurements[feat.num_measurements++] = {cam_id, timestamp, Eigen::Vector2d(u, v), Eigen::Vector2d(u_n, v_n)};
+            if (feat.num_measurements > dbg_max_meas) dbg_max_meas = feat.num_measurements;
         }
         return;
     }
@@ -94,15 +98,27 @@ void update_feature(FeatureDatabase& db, int feat_id, double timestamp, int cam_
     }
     
     int insert_idx = 0;
-    while (insert_idx < (int)db.count && db.features[insert_idx].featid < feat_id) {
+    while (insert_idx < (int)db.count && db.features[db.order[insert_idx]].featid < feat_id) {
         insert_idx++;
     }
-    
-    for (int i = (int)db.count; i > insert_idx; --i) {
-        db.features[i] = db.features[i - 1];
+
+    // Take a slot: recycled if one is free, otherwise the next fresh one. The
+    // payload stays where it is for its whole life.
+    int slot;
+    if (db.num_free > 0) {
+        slot = db.free_slots[--db.num_free];
+    } else {
+        if (db.num_slots_used >= 2048) { ++db_full_refusals; return; }
+        slot = db.num_slots_used++;
     }
-    
-    Feature& feat = db.features[insert_idx];
+
+    dbg_shift_elems += (long)db.count - insert_idx;
+    for (int i = (int)db.count; i > insert_idx; --i) {
+        db.order[i] = db.order[i - 1];
+    }
+    db.order[insert_idx] = slot;
+
+    Feature& feat = db.features[slot];
     feat.featid = feat_id;
     feat.to_delete = false;
     feat.num_measurements = 1;
@@ -113,16 +129,18 @@ void update_feature(FeatureDatabase& db, int feat_id, double timestamp, int cam_
     feat.anchor_clone_timestamp = 0.0;
     
     db.count++;
+    if ((long)db.count > dbg_max_count) dbg_max_count = (long)db.count;
 }
 
 void cleanup_db(FeatureDatabase& db) {
+    dbg_compact_elems += (long)db.count;
     int write_idx = 0;
     for (int i = 0; i < (int)db.count; ++i) {
-        if (!db.features[i].to_delete) {
-            if (write_idx != i) {
-                db.features[write_idx] = db.features[i];
-            }
-            write_idx++;
+        const int slot = db.order[i];
+        if (!db.features[slot].to_delete) {
+            db.order[write_idx++] = slot;
+        } else {
+            db.free_slots[db.num_free++] = slot;
         }
     }
     db.count = write_idx;
@@ -131,12 +149,13 @@ void cleanup_db(FeatureDatabase& db) {
 void cleanup_db_measurements(FeatureDatabase& db, double timestamp) {
     int write_idx = 0;
     for (int i = 0; i < (int)db.count; ++i) {
-        clear_older_measurements(db.features[i], timestamp);
-        if (db.features[i].num_measurements >= 1) {
-            if (write_idx != i) {
-                db.features[write_idx] = db.features[i];
-            }
-            write_idx++;
+        const int slot = db.order[i];
+        Feature& feat = db.features[slot];
+        clear_older_measurements(feat, timestamp);
+        if (feat.num_measurements >= 1) {
+            db.order[write_idx++] = slot;
+        } else {
+            db.free_slots[db.num_free++] = slot;
         }
     }
     db.count = write_idx;
@@ -145,12 +164,13 @@ void cleanup_db_measurements(FeatureDatabase& db, double timestamp) {
 void cleanup_db_measurements_exact(FeatureDatabase& db, double timestamp) {
     int write_idx = 0;
     for (int i = 0; i < (int)db.count; ++i) {
-        clean_invalid_measurements(db.features[i], &timestamp, 1);
-        if (db.features[i].num_measurements >= 1) {
-            if (write_idx != i) {
-                db.features[write_idx] = db.features[i];
-            }
-            write_idx++;
+        const int slot = db.order[i];
+        Feature& feat = db.features[slot];
+        clean_invalid_measurements(feat, &timestamp, 1);
+        if (feat.num_measurements >= 1) {
+            db.order[write_idx++] = slot;
+        } else {
+            db.free_slots[db.num_free++] = slot;
         }
     }
     db.count = write_idx;
@@ -159,7 +179,7 @@ void cleanup_db_measurements_exact(FeatureDatabase& db, double timestamp) {
 double get_oldest_db_timestamp(const FeatureDatabase& db) {
     double oldest_time = -1.0;
     for (int i = 0; i < (int)db.count; ++i) {
-        const Feature& feat = db.features[i];
+        const Feature& feat = feature_at(db, i);
         for (int m = 0; m < feat.num_measurements; ++m) {
             double t = feat.measurements[m].timestamp;
             if (oldest_time == -1.0 || t < oldest_time) {
@@ -629,10 +649,10 @@ bool compute_disparity(const FeatureDatabase& db, double newest_time, double old
     int disparities_count = 0;
     
     for (int i = 0; i < (int)db.count; ++i) {
-        const Feature& feat = db.features[i];
+        const Feature& feat = feature_at(db, i);
         
         for (int cid = 0; cid < 2; ++cid) {
-            int cam_meas[48];
+            int cam_meas[FEATURE_MAX_MEASUREMENTS];
             int num_cam_meas = 0;
             for (int m = 0; m < feat.num_measurements; ++m) {
                 if (feat.measurements[m].cam_id == cid) {
@@ -695,7 +715,7 @@ bool compute_disparity_two_frames(const FeatureDatabase& db, double time0, doubl
     int disparities_count = 0;
     
     for (int i = 0; i < (int)db.count; ++i) {
-        const Feature& feat = db.features[i];
+        const Feature& feat = feature_at(db, i);
         
         for (int cid = 0; cid < 2; ++cid) {
             int idx0 = -1;

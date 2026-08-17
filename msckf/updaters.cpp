@@ -148,7 +148,7 @@ void get_feature_jacobian_full(const State& state, const core::Feature& feature,
     }
     
     int M = 0;
-    int meas_idx[48];
+    int meas_idx[core::FEATURE_MAX_MEASUREMENTS];
     for (int m = 0; m < feature.num_measurements; ++m) {
         if (feature.measurements[m].cam_id == cam_id) {
             meas_idx[M++] = m;
