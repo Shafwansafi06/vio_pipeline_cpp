@@ -50,6 +50,10 @@ struct InitializerOptions {
     // if it is discarded). Turned ON in tools/euroc_options.hpp, where the
     // measurements above were taken.
     bool init_dyn_zero_velocity = false;
+    // Use the feature-less initializer (sqrtVINS Sec. V-A) instead of the
+    // feature-based linear solve. Recovers velocity and gravity from bearing
+    // epipolar geometry plus preintegration, without estimating any 3D point.
+    bool init_featureless = false;
     // Diagnostic only: accelerometer excitation (m/s^2 std) over the window.
     double init_dyn_min_excitation = 0.0;
     double init_dyn_inflation_ori = 10.0;
@@ -74,6 +78,14 @@ bool dynamic_initialize(const InitializerOptions& config,
                         type::Variable& t_imu,
                         Eigen::Matrix<double, 15, 15>& covariance,
                         double& timestamp);
+
+bool featureless_initialize(const InitializerOptions& config,
+                            core::FeatureDatabase& db,
+                            const core::ImuData* imu_data, int imu_count,
+                            const double camera_extrinsics[2][7], int num_cameras,
+                            type::Variable& t_imu,
+                            Eigen::Matrix<double, 15, 15>& covariance,
+                            double& timestamp);
 
 bool run_initialization(const InitializerOptions& config,
                         core::FeatureDatabase& db,

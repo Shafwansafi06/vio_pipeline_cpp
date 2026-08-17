@@ -4,6 +4,7 @@
 #include <iostream>
 #include <algorithm>
 #include <map>
+#include <cstdint>
 #include <vector>
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
@@ -402,6 +403,294 @@ Eigen::Matrix<double, 7, 1> compute_dongsi_coeff(const Eigen::MatrixXd& D, const
 }
 
 } // namespace
+
+// ---------------------------------------------------------------------------
+// Feature-less dynamic initialization (sqrtVINS, Peng et al., T-RO 2025, Sec. V-A).
+//
+// The existing dynamic initializer solves for [features, velocity, gravity]
+// jointly. Over a short, low-parallax window that system is nearly rank
+// deficient in the feature block, and the velocity it returns is unreliable --
+// measured against Leica truth, MH_02 recovered 0.162 m/s where the truth was
+// 0.029 and the run diverged, while every quality metric (residual,
+// conditioning, recovered gravity direction) looked healthy. The mitigation
+// shipped for that was to discard the velocity entirely, which is a workaround,
+// not a fix.
+//
+// This recovers velocity and gravity WITHOUT ever estimating a 3D point:
+//
+//   Prop. 1  For a feature seen from two frames, the two bearings rotated into
+//            {I0} span an epipolar plane whose normal n is perpendicular to the
+//            relative translation t. Stacking M = sum(n n^T) over features, t is
+//            the eigenvector of M for the smallest eigenvalue -- the up-to-scale
+//            translation direction, from bearings alone.
+//
+//   Prop. 2  Preintegration gives the same relative translation with scale:
+//                s t = A x + c,   x = [v_I0; g],
+//                A = [ (dT_j - dT_i) I,  (dT_j^2 - dT_i^2)/2 I ]
+//                c = (alpha_j - alpha_i) + (R_j^T - R_i^T) p_CinI
+//            Projecting onto the two directions orthogonal to t eliminates the
+//            unknown scale s, leaving 2 equations per frame pair in 6 unknowns.
+//
+// Cost is O(M) in features rather than O(M^3), and low parallax degrades the
+// direction estimate gracefully instead of making the system singular.
+bool featureless_initialize(const InitializerOptions& config,
+                            core::FeatureDatabase& db,
+                            const core::ImuData* imu_data, int imu_count,
+                            const double camera_extrinsics[2][7], int num_cameras,
+                            type::Variable& t_imu,
+                            Eigen::Matrix<double, 15, 15>& covariance,
+                            double& timestamp);
+
+
+bool featureless_initialize(const InitializerOptions& config,
+                            core::FeatureDatabase& db,
+                            const core::ImuData* imu_data, int imu_count,
+                            const double camera_extrinsics[2][7], int num_cameras,
+                            type::Variable& t_imu,
+                            Eigen::Matrix<double, 15, 15>& covariance,
+                            double& timestamp) {
+    (void)num_cameras;
+    double newest_cam_time = -1.0;
+    for (int f = 0; f < (int)db.count; ++f) {
+        const core::Feature& feat = db.features[f];
+        for (int m = 0; m < feat.num_measurements; ++m) {
+            newest_cam_time = std::max(newest_cam_time, feat.measurements[m].timestamp);
+        }
+    }
+    if (newest_cam_time < 0.0) return false;
+
+    // Camera times spanning the window, evenly spaced.
+    std::vector<double> times;
+    {
+        std::map<double, bool> unique_times;
+        const double oldest_allowed = newest_cam_time - config.init_window_time;
+        for (int f = 0; f < (int)db.count; ++f) {
+            const core::Feature& feat = db.features[f];
+            for (int m = 0; m < feat.num_measurements; ++m) {
+                const double t = feat.measurements[m].timestamp;
+                if (t >= oldest_allowed) unique_times[t] = true;
+            }
+        }
+        if ((int)unique_times.size() < 2) return false;
+        // Take up to kMaxTimes samples spread evenly over whatever the window
+        // actually holds, rather than a fixed spacing. Fixed spacing gave only 3
+        // times here -- 3 pairs, 6 equations for 6 unknowns -- and the resulting
+        // gravity was 3.2 deg off on MH_01, which is a 0.5 m/s^2 horizontal
+        // acceleration leak and diverges. The pair count is O(k^2), so k is
+        // capped rather than unbounded.
+        constexpr int kMaxTimes = 8;
+        std::vector<double> all;
+        all.reserve(unique_times.size());
+        for (auto const& tp : unique_times) all.push_back(tp.first);
+        const int take = std::min<int>(kMaxTimes, int(all.size()));
+        for (int i = 0; i < take; ++i) {
+            const int idx = (take == 1) ? 0 : int((std::int64_t)i * (all.size() - 1) / (take - 1));
+            if (times.empty() || all[idx] != times.back()) times.push_back(all[idx]);
+        }
+    }
+    if (times.size() < 3) return false;
+
+    const double t0 = times.front();
+    const Eigen::Vector3d gyroscope_bias = config.init_dyn_bias_g;
+    const Eigen::Vector3d accelerometer_bias = config.init_dyn_bias_a;
+
+    // Preintegrate I0 -> Ik for each selected time.
+    std::map<double, CpiMeans> cpi;
+    static core::ImuData seg[4096];
+    for (double tk : times) {
+        CpiMeans c;
+        c.b_w = gyroscope_bias;
+        c.b_a = accelerometer_bias;
+        if (tk != t0) {
+            const double a = t0 + config.init_calib_camImu_dt;
+            const double b = tk + config.init_calib_camImu_dt;
+            const int ns = select_imu(imu_data, imu_count, a, b, seg, 4096);
+            if (ns < 2) return false;
+            if (std::abs((seg[ns - 1].timestamp - seg[0].timestamp) - (b - a)) > 0.01) return false;
+            for (int k = 0; k < ns - 1; ++k) {
+                c.feed(seg[k].timestamp, seg[k + 1].timestamp, seg[k].wm, seg[k].am,
+                       seg[k + 1].wm, seg[k + 1].am);
+            }
+        }
+        cpi[tk] = c;
+    }
+
+    // Camera-IMU extrinsics: state stores T_cam_imu = (R_ItoC, p_IinC).
+    const Eigen::Vector4d q_ItoC(camera_extrinsics[0][0], camera_extrinsics[0][1],
+                                 camera_extrinsics[0][2], camera_extrinsics[0][3]);
+    const Eigen::Matrix3d R_ItoC = type::quat_2_Rot(q_ItoC);
+    const Eigen::Vector3d p_IinC(camera_extrinsics[0][4], camera_extrinsics[0][5],
+                                 camera_extrinsics[0][6]);
+    const Eigen::Vector3d p_CinI = -R_ItoC.transpose() * p_IinC;
+
+    // Two equations per frame pair, six unknowns [v_I0; g].
+    std::vector<Eigen::Matrix<double, 1, 6>> rows;
+    std::vector<double> rhs;
+    int used_pairs = 0;
+
+    for (std::size_t a = 0; a < times.size(); ++a) {
+        for (std::size_t b = a + 1; b < times.size(); ++b) {
+            const double ti = times[a];
+            const double tj = times[b];
+            const Eigen::Matrix3d R_i = cpi[ti].R_k2tau;  // R_{I0 -> Ii}
+            const Eigen::Matrix3d R_j = cpi[tj].R_k2tau;
+
+            // Prop. 1: epipolar-plane normals from bearings rotated into {I0}.
+            Eigen::Matrix3d M = Eigen::Matrix3d::Zero();
+            int shared = 0;
+            for (int f = 0; f < (int)db.count; ++f) {
+                const core::Feature& feat = db.features[f];
+                const Eigen::Vector2d* uv_i = nullptr;
+                const Eigen::Vector2d* uv_j = nullptr;
+                for (int m = 0; m < feat.num_measurements; ++m) {
+                    if (feat.measurements[m].cam_id != 0) continue;
+                    if (feat.measurements[m].timestamp == ti) uv_i = &feat.measurements[m].uv_norm;
+                    if (feat.measurements[m].timestamp == tj) uv_j = &feat.measurements[m].uv_norm;
+                }
+                if (uv_i == nullptr || uv_j == nullptr) continue;
+                Eigen::Vector3d bi(uv_i->x(), uv_i->y(), 1.0);
+                Eigen::Vector3d bj(uv_j->x(), uv_j->y(), 1.0);
+                bi.normalize();
+                bj.normalize();
+                // camera -> IMU -> {I0}
+                const Eigen::Vector3d b_i0 = R_i.transpose() * (R_ItoC.transpose() * bi);
+                const Eigen::Vector3d b_j0 = R_j.transpose() * (R_ItoC.transpose() * bj);
+                const Eigen::Vector3d n = b_i0.cross(b_j0);
+                const double n_norm = n.norm();
+                if (n_norm < 1e-9) continue;   // parallel bearings carry no direction
+                const Eigen::Vector3d n_unit = n / n_norm;
+                M.noalias() += n_unit * n_unit.transpose();
+                ++shared;
+            }
+            if (shared < 8) continue;
+
+            Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eig(M);
+            if (eig.info() != Eigen::Success) continue;
+            // Ascending eigenvalues: t is the null direction, e spans its complement.
+            const Eigen::Vector3d t_dir = eig.eigenvectors().col(0);
+            const Eigen::Vector3d e1 = eig.eigenvectors().col(1);
+            const Eigen::Vector3d e2 = eig.eigenvectors().col(2);
+
+            // Prop. 2: s t = A x + c, projected onto e to drop the scale s.
+            const double dTi = cpi[ti].DT;
+            const double dTj = cpi[tj].DT;
+            Eigen::Matrix<double, 3, 6> A;
+            A.leftCols<3>() = (dTj - dTi) * Eigen::Matrix3d::Identity();
+            // NEGATIVE: this pipeline's state assembly (and the feature-based
+            // initializer it shares it with) uses
+            //     p_Ik = v dT - 1/2 g dT^2 + alpha
+            // i.e. the recovered `gravity_inI0` is the UPWARD vector, not the
+            // physical downward one the paper writes with a +1/2 g dT^2. The
+            // solved quantity has to match the convention it is consumed in.
+            A.rightCols<3>() = -0.5 * (dTj * dTj - dTi * dTi) * Eigen::Matrix3d::Identity();
+            const Eigen::Vector3d c =
+                (cpi[tj].alpha_tau - cpi[ti].alpha_tau) +
+                (R_j.transpose() - R_i.transpose()) * p_CinI;
+
+            rows.push_back(e1.transpose() * A);
+            rhs.push_back(-e1.dot(c));
+            rows.push_back(e2.transpose() * A);
+            rhs.push_back(-e2.dot(c));
+            ++used_pairs;
+        }
+    }
+
+    if (used_pairs < 3 || (int)rows.size() < 6) {
+        std::cout << "[init-f]: only " << used_pairs << " usable frame pairs\n";
+        return false;
+    }
+
+    Eigen::MatrixXd Amat(rows.size(), 6);
+    Eigen::VectorXd bvec(rows.size());
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        Amat.row(i) = rows[i];
+        bvec(i) = rhs[i];
+    }
+    Eigen::JacobiSVD<Eigen::MatrixXd> svd(Amat, Eigen::ComputeThinU | Eigen::ComputeThinV);
+    const double rec_cond = svd.singularValues()(5) / svd.singularValues()(0);
+    if (!(rec_cond > config.init_dyn_min_rec_cond)) {
+        std::cout << "[init-f]: rec_cond " << rec_cond << " too small\n";
+        return false;
+    }
+    Eigen::Matrix<double, 6, 1> x = svd.solve(bvec);
+
+    Eigen::Vector3d v_I0inI0 = x.head<3>();
+    Eigen::Vector3d gravity_inI0 = x.tail<3>();
+    if (gravity_inI0.norm() < 1e-6) return false;
+
+    // |g| is known; enforce it, then re-solve the velocity with gravity fixed.
+    gravity_inI0 = gravity_inI0.normalized() * config.gravity_mag;
+    {
+        Eigen::MatrixXd Av = Amat.leftCols<3>();
+        Eigen::VectorXd bv = bvec - Amat.rightCols<3>() * gravity_inI0;
+        v_I0inI0 = Av.colPivHouseholderQr().solve(bv);
+    }
+
+    // Cross-check the recovered gravity against the accelerometer: over a short
+    // window the mean specific force is dominated by gravity.
+    double gravity_angle_deg = -1.0;
+    {
+        Eigen::Vector3d mean_am = Eigen::Vector3d::Zero();
+        int n = 0;
+        for (int k = 0; k < imu_count; ++k) {
+            if (imu_data[k].timestamp < t0) continue;
+            if (imu_data[k].timestamp > times.back()) break;
+            mean_am += imu_data[k].am;
+            ++n;
+        }
+        if (n > 0) {
+            mean_am /= double(n);
+            const double c = mean_am.normalized().dot(gravity_inI0.normalized());
+            gravity_angle_deg = 180.0 / M_PI * std::acos(std::max(-1.0, std::min(1.0, c)));
+        }
+    }
+    std::cout << "[init-f]: featureless init OK  |g|=" << gravity_inI0.norm()
+              << " |v0|=" << v_I0inI0.norm() << " pairs=" << used_pairs
+              << " times=" << times.size()
+              << " rec_cond=" << rec_cond
+              << " gravity-vs-accel=" << gravity_angle_deg << " deg\n";
+
+    // Same state assembly as the dynamic initializer: gravity-align, then
+    // propagate I0 -> newest.
+    Eigen::Matrix3d R_GtoI0 = Eigen::Matrix3d::Identity();
+    gram_schmidt(gravity_inI0, R_GtoI0);
+    const Eigen::Vector4d q_GtoI0 = type::rot_2_quat(R_GtoI0);
+
+    const CpiMeans& cpiN = cpi[times.back()];
+    const double DTn = cpiN.DT;
+    const Eigen::Vector3d p_IkinI0 =
+        v_I0inI0 * DTn - 0.5 * gravity_inI0 * DTn * DTn + cpiN.alpha_tau;
+    const Eigen::Vector3d v_IkinI0 = v_I0inI0 - gravity_inI0 * DTn + cpiN.beta_tau;
+    const Eigen::Vector4d q_I0toIk = type::rot_2_quat(cpiN.R_k2tau);
+    const Eigen::Vector4d q_GtoIk = type::quat_multiply(q_I0toIk, q_GtoI0);
+    const Eigen::Vector3d p_IkinG = R_GtoI0.transpose() * p_IkinI0;
+    const Eigen::Vector3d v_IkinG = R_GtoI0.transpose() * v_IkinI0;
+
+    Eigen::Matrix<double, 16, 1> imu_state = Eigen::Matrix<double, 16, 1>::Zero();
+    imu_state.head<4>() = q_GtoIk;
+    imu_state.segment<3>(4) = p_IkinG;
+    imu_state.segment<3>(7) = v_IkinG;
+    imu_state.segment<3>(10) = gyroscope_bias;
+    imu_state.tail<3>() = accelerometer_bias;
+
+    const int original_id = t_imu.id;
+    type::init_imu(t_imu);
+    t_imu.id = original_id;
+    type::set_variable_value(t_imu, imu_state);
+    type::set_variable_fej(t_imu, imu_state);
+
+    covariance = (0.02 * 0.02) * Eigen::Matrix<double, 15, 15>::Identity();
+    covariance.block<3, 3>(3, 3) = (0.05 * 0.05) * Eigen::Matrix3d::Identity();
+    covariance.block<3, 3>(6, 6) = (0.05 * 0.05) * Eigen::Matrix3d::Identity();
+    covariance.block<3, 3>(12, 12) = (0.05 * 0.05) * Eigen::Matrix3d::Identity();
+    covariance.block<3, 3>(0, 0) *= config.init_dyn_inflation_ori;
+    covariance.block<3, 3>(6, 6) *= config.init_dyn_inflation_vel;
+    covariance.block<3, 3>(9, 9) *= config.init_dyn_inflation_bg;
+    covariance.block<3, 3>(12, 12) *= config.init_dyn_inflation_ba;
+
+    timestamp = times.back();
+    return true;
+}
 
 bool dynamic_initialize(const InitializerOptions& config,
                         core::FeatureDatabase& db,

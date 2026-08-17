@@ -1907,3 +1907,97 @@ through DOD's *rosbag* runner, so both sides read the identical bag through the
 identical transport. Official exits non-zero at shutdown (a class_loader unload
 throw, after all its work and output are complete), so hyperfine is run with
 `-i`.
+
+---
+
+## Benchmark 15 — faster and less fragile (2026-08-17)
+
+Two threads: four exact optimisations, and replacing the initialiser workaround
+with a principled algorithm from sqrtVINS (Peng et al., T-RO 2025).
+
+### Speed: 5.58 -> 4.15 ms/frame, every ATE bit-identical
+
+| | before | after |
+|---|---|---|
+| chi2 gate (MSCKF) | 0.273 | **0.079** |
+| M_a = P H^T | 0.668 | **0.461** |
+| S + inverse | 0.436 | **0.263** |
+| K | 0.272 | **0.160** |
+| covariance update | 0.745 | **0.506** |
+| estimator mean | 3.007 | **2.01** |
+| **total/frame (8 EuRoC)** | **5.58** | **4.15** |
+
+1. **Exact early-accept for the chi2 gate.** `S = H P H^T + sigma^2 I` is PD with
+   `S >= sigma^2 I`, hence `chi2 = r^T S^-1 r <= r^T r / sigma^2`. If that bound
+   clears the threshold the feature *cannot* fail the real test, so the marginal
+   covariance gather, two dense products and a Cholesky are skipped. Decisions
+   are identical, not approximate.
+
+2. **Square-root update** (the sqrtVINS principle: never invert what you can
+   factor). With `S = L L^T` and `G := M_a L^-T`, `K M_a^T = G G^T` and
+   `dx = G (L^-1 res)`. The explicit `m^3` inverse and the separate
+   `K = M_a S^-1` both disappear, and the covariance update becomes a symmetric
+   rank-k update -- which also removes the floating-point asymmetry that made
+   the dense form drive diagonals negative.
+
+3. **One GEMM for `M_a`.** `H` is already contiguous in `H_order` sequence; the
+   covariance columns are not, so gather once and do a single `(N x c)(c x m)`
+   product instead of ~13 skinny GEMMs with `k = 6`.
+
+4. **`STATE_COV_CAPACITY` 512 -> 384.** `state.Cov` is fixed-size, so every block
+   operation strides by the CAPACITY, not the live state size: at 240 live dims
+   over half of each fetched cache line was wasted, on a 2 MB matrix. True worst
+   case is 341; `init_state` now validates it at runtime instead of relying on
+   asserts that compile out under NDEBUG.
+
+hyperfine, MH_01 bag, 5 runs: DOD **14.945 s** +- 0.049 vs OpenVINS 29.053 s
++- 0.044 -- **1.94x**, up from 1.56x.
+
+### Robustness: the initialiser workaround is gone
+
+MH_02 previously survived only because the dynamic initialiser's velocity was
+discarded (`init_dyn_zero_velocity`) *and* the state value was zeroed while its
+FEJ kept the solved value -- an asymmetry that worked but was never explained.
+The root cause was that the feature-based linear solve cannot observe velocity
+over a short, low-parallax window: it recovered 0.445 m/s on MH_01 where truth
+was 0.048.
+
+sqrtVINS Sec. V-A avoids the problem by never estimating a 3D point:
+
+- **Prop. 1**: for a feature seen from two frames, the bearings rotated into
+  {I0} span an epipolar plane whose normal is perpendicular to the relative
+  translation. `M = sum(n n^T)`; the smallest eigenvector is the translation
+  direction -- from bearings alone.
+- **Prop. 2**: preintegration supplies the same translation with scale;
+  projecting onto the two directions orthogonal to `t` eliminates the unknown
+  scale, leaving 2 equations per frame pair in 6 unknowns `[v; g]`.
+
+Ported here it recovers **0.042 m/s on MH_01 against a truth of 0.048**, with
+gravity within 0.15 deg, so the velocity is usable and the workaround is
+deleted.
+
+| sequence | with workaround | feature-less |
+|---|---|---|
+| MH_01 | **0.1131** | 0.1282 |
+| MH_02 | 0.1744 | **0.1595** |
+| MH_03 | **0.2223** | 0.2234 |
+| MH_04 | 0.4580 | **0.4416** |
+| MH_05 | **0.3074** | 0.3115 |
+| V1_01 | **0.0494** | 0.0499 |
+| V1_02 | **0.0551** | 0.0553 |
+| V1_03 | **0.0560** | 0.0564 |
+| **mean** | 0.1795 | **0.1782** |
+
+Marginally better on average, better on the two sequences that were worst, and
+one fewer unexplained mechanism holding the filter up.
+
+Two implementation notes worth keeping. The gravity block sign must match the
+consuming convention (`p = v dT - 1/2 g dT^2 + alpha` here, against the paper's
+`+1/2 g dT^2`) -- with the wrong sign MH_02 diverges while every diagnostic
+looks healthy. And frame-pair selection matters: a fixed time spacing yielded 3
+pairs, 6 equations for 6 unknowns, and gravity 3.2 deg off on MH_01 -- a 0.5
+m/s^2 horizontal leak that diverges. Sampling evenly across whatever the window
+holds fixed it (0.15 deg).
+
+KAIST is unchanged (circle 0.0374, infinity 0.0261): its runner keeps its own
+config and does not enable the feature-less path.

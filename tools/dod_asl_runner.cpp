@@ -147,6 +147,7 @@ int main(int argc, char** argv) {
     options.init_opt.init_dyn_min_rec_cond = env_double("VIO_DYN_MIN_REC_COND", options.init_opt.init_dyn_min_rec_cond);
     options.init_opt.init_dyn_min_excitation = env_double("VIO_DYN_MIN_EXCITATION", options.init_opt.init_dyn_min_excitation);
     options.init_opt.init_dyn_zero_velocity = env_int("VIO_DYN_ZERO_V0", options.init_opt.init_dyn_zero_velocity ? 1 : 0) != 0;
+    options.init_opt.init_featureless = env_int("VIO_INIT_FEATURELESS", options.init_opt.init_featureless ? 1 : 0) != 0;
     // Diagnostic only: overwrite the initial velocity right after the filter
     // initialises, to test whether a bad initial velocity is what kills a run.
     const char* v0_env = std::getenv("VIO_FORCE_V0");

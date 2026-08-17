@@ -413,9 +413,19 @@ bool try_to_initialize(VioManagerData& vio) {
     // OpenVINS's InertialInitializer, which falls back to the dynamic
     // initializer when the static one cannot find a stationary window.
     if (!success && vio.params.init_opt.init_dyn_use) {
-        success = initialize::dynamic_initialize(vio.params.init_opt, vio.db, vio.imu_buffer, vio.imu_count,
-                                                 vio.params.camera_extrinsics, vio.params.num_cameras,
-                                                 vio.state.imu, init_cov, init_ts);
+        if (vio.params.init_opt.init_featureless) {
+            success = initialize::featureless_initialize(
+                vio.params.init_opt, vio.db, vio.imu_buffer, vio.imu_count,
+                vio.params.camera_extrinsics, vio.params.num_cameras,
+                vio.state.imu, init_cov, init_ts);
+        }
+        // The feature-based solve remains the fallback: if the bearing geometry
+        // is too weak to give a translation direction, it can still be tried.
+        if (!success) {
+            success = initialize::dynamic_initialize(vio.params.init_opt, vio.db, vio.imu_buffer, vio.imu_count,
+                                                     vio.params.camera_extrinsics, vio.params.num_cameras,
+                                                     vio.state.imu, init_cov, init_ts);
+        }
     }
     if (success) {
         vio.state.timestamp = init_ts;

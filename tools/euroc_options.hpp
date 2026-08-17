@@ -85,14 +85,23 @@ inline msckf::VioManagerOptions make_euroc_options() {
     options.init_opt.init_dyn_use = true;
     options.init_opt.init_dyn_num_pose = 5;
     options.init_opt.init_dyn_min_deg = 5.0;
-    // Discard the dynamic initializer's velocity on EuRoC. Its linear stage
-    // cannot observe v0 over these near-static start windows -- measured at the
-    // init instant against Leica truth: MH_01 recovers 0.445 m/s where truth is
-    // 0.048, MH_02 recovers 0.162 where truth is 0.029. MH_01 survives that;
-    // MH_02 diverges to 6.5e5 m. Zeroing it: MH_01 0.1132 -> 0.1131 m,
-    // MH_02 6.5e5 -> 0.1744 m. Official avoids this with a Ceres MLE refinement
-    // of the linear solution, which is not ported.
-    options.init_opt.init_dyn_zero_velocity = true;
+    // Feature-less dynamic initialization (sqrtVINS Sec. V-A): recover velocity
+    // and gravity from bearing epipolar geometry plus preintegration, never
+    // estimating a 3D point. This REPLACES the init_dyn_zero_velocity
+    // workaround: the feature-based solve could not observe v0 over these short
+    // windows (MH_01 recovered 0.445 m/s against a truth of 0.048), so its
+    // velocity had to be thrown away, and MH_02 then survived only through an
+    // unexplained asymmetry between the state value and its FEJ. The
+    // feature-less solve recovers 0.042 m/s on MH_01 with gravity within
+    // 0.15 deg, so the velocity is usable and the workaround is gone.
+    //
+    //   sequence   with workaround   feature-less
+    //   MH_01      0.1131            0.1282
+    //   MH_02      0.1744            0.1595
+    //   MH_04      0.4580            0.4416
+    //   mean(8)    0.1795            0.1782
+    options.init_opt.init_featureless = true;
+    options.init_opt.init_dyn_zero_velocity = false;
     // mav0/imu0/sensor.yaml (ADIS16448), noise density / random walk as-shipped.
     options.noises.sigma_a = 2.0000e-3;
     options.noises.sigma_ab = 3.0000e-3;
