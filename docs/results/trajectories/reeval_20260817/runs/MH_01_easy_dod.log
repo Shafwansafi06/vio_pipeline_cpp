@@ -1,0 +1,23 @@
+frames=250 initialized=1 tracks=200 mean_track_ms=1.715 mean_estimator_ms=2.350
+frames=500 initialized=1 tracks=184 mean_track_ms=1.665 mean_estimator_ms=2.276
+frames=750 initialized=1 tracks=181 mean_track_ms=1.531 mean_estimator_ms=2.146
+frames=1000 initialized=1 tracks=200 mean_track_ms=1.497 mean_estimator_ms=2.114
+frames=1250 initialized=1 tracks=195 mean_track_ms=1.495 mean_estimator_ms=2.119
+frames=1500 initialized=1 tracks=194 mean_track_ms=1.490 mean_estimator_ms=2.205
+frames=1750 initialized=1 tracks=181 mean_track_ms=1.518 mean_estimator_ms=2.231
+frames=2000 initialized=1 tracks=184 mean_track_ms=1.511 mean_estimator_ms=2.242
+frames=2250 initialized=1 tracks=200 mean_track_ms=1.523 mean_estimator_ms=2.302
+frames=2500 initialized=1 tracks=195 mean_track_ms=1.519 mean_estimator_ms=2.310
+frames=2750 initialized=1 tracks=195 mean_track_ms=1.517 mean_estimator_ms=2.339
+frames=3000 initialized=1 tracks=183 mean_track_ms=1.505 mean_estimator_ms=2.295
+frames=3250 initialized=1 tracks=192 mean_track_ms=1.487 mean_estimator_ms=2.201
+frames=3500 initialized=1 tracks=200 mean_track_ms=1.482 mean_estimator_ms=2.151
+complete frames=3682 initialized=1 tracking_mean_ms=1.479879 estimator_mean_ms=2.131025
+[TRI] accept=31330 reject_cond=27714 reject_mindist=1067 reject_maxdist=0 reject_nan=0 | gn_accept=31229 gn_reject_dist=22 gn_reject_baseline=79
+[TRI] mean_meas accepted=19.10 rejected_cond=17.60
+[DB] full_refusals=0 db_count=195 slam_features=2
+[CLS] frames=3678 per-frame: lost=2.06 marginal=10.72 maxtrack=3.57 slam_update=44.21 db=177.0 retire_untracked=0.35 retire_chi2=0.48
+[ANCHOR] ok=13378 fail_no_old=0 fail_depth=0 fail_transform=0
+[DINIT] seen=13134 ok=3060 skip_cap=0 skip_meas=0 skip_tri=8438
+[TRI] nmeas: 2:(404/680) 3:(428/367) 4:(389/241) 5:(393/204) 6:(366/175) 7:(316/157) 8:(340/155) 9:(330/95) 10:(308/133) 11:(348/93) 12:(5639/10695) 13:(446/94) 14:(369/68) 15:(321/79) 
+[init-f]: featureless init OK  |g|=9.81 |v0|=0.0419903 pairs=3 times=3 rec_cond=0.000229781 gravity-vs-accel=0.150509 deg

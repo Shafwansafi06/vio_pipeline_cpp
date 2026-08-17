@@ -1,0 +1,15 @@
+frames=250 initialized=1 tracks=139 mean_track_ms=1.614 mean_estimator_ms=1.898
+frames=500 initialized=1 tracks=139 mean_track_ms=1.584 mean_estimator_ms=2.344
+frames=750 initialized=1 tracks=183 mean_track_ms=1.615 mean_estimator_ms=2.523
+frames=1000 initialized=1 tracks=162 mean_track_ms=1.657 mean_estimator_ms=2.612
+frames=1250 initialized=1 tracks=182 mean_track_ms=1.643 mean_estimator_ms=2.598
+frames=1500 initialized=1 tracks=145 mean_track_ms=1.649 mean_estimator_ms=2.646
+complete frames=1709 initialized=1 tracking_mean_ms=1.648433 estimator_mean_ms=2.642290
+[TRI] accept=22524 reject_cond=2023 reject_mindist=980 reject_maxdist=0 reject_nan=0 | gn_accept=22485 gn_reject_dist=9 gn_reject_baseline=30
+[TRI] mean_meas accepted=17.11 rejected_cond=8.39
+[DB] full_refusals=0 db_count=183 slam_features=48
+[CLS] frames=1705 per-frame: lost=5.35 marginal=6.50 maxtrack=3.21 slam_update=41.64 db=149.4 retire_untracked=1.44 retire_chi2=0.75
+[ANCHOR] ok=4823 fail_no_old=0 fail_depth=0 fail_transform=0
+[DINIT] seen=5476 ok=3778 skip_cap=0 skip_meas=0 skip_tri=578
+[TRI] nmeas: 2:(646/475) 3:(593/209) 4:(603/98) 5:(561/75) 6:(597/70) 7:(482/48) 8:(459/22) 9:(457/37) 10:(449/33) 11:(444/14) 12:(2825/790) 13:(554/3) 14:(486/10) 15:(419/5) 
+[init-f]: featureless init OK  |g|=9.81 |v0|=0.00758913 pairs=3 times=3 rec_cond=4.69004e-05 gravity-vs-accel=0.198735 deg

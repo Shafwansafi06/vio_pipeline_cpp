@@ -1,0 +1,60 @@
+{
+  "estimate_samples": 2029,
+  "groundtruth_samples": 1470,
+  "associated_samples": 1453,
+  "duration_seconds": 101.40000009536743,
+  "ate_rmse_m": 0.42670034176770555,
+  "ate_mean_m": 0.3984856547122522,
+  "ate_median_m": 0.3711307258914155,
+  "ate_p95_m": 0.695377460840701,
+  "ate_max_m": 0.8532258459423016,
+  "relative_translation_rmse_m_approx_1pct": 0.1436126998422316,
+  "estimated_path_length_m": 91.4849859499893,
+  "groundtruth_path_length_m": 91.10181698889652,
+  "estimated_elevation_change_m": 0.15620987703100964,
+  "groundtruth_elevation_change_m": 0.00507058699999996,
+  "segments": {
+    "begin": {
+      "timestamp": 1403638129.145097,
+      "estimate_aligned": [
+        4.336909145511609,
+        -1.6517157217673608,
+        0.6253813016737915
+      ],
+      "groundtruth": [
+        4.614837949,
+        -1.800945207,
+        0.686504344
+      ],
+      "error_m": 0.32132520189754565
+    },
+    "middle": {
+      "timestamp": 1403638175.795097,
+      "estimate_aligned": [
+        8.14390870475758,
+        2.5188652369446936,
+        1.7973979175921126
+      ],
+      "groundtruth": [
+        7.879277746,
+        2.730292488,
+        1.823361326
+      ],
+      "error_m": 0.3397132988240444
+    },
+    "end": {
+      "timestamp": 1403638228.845097,
+      "estimate_aligned": [
+        4.702890899901311,
+        -1.8645025087177367,
+        0.7815911787048011
+      ],
+      "groundtruth": [
+        4.377100424,
+        -1.641455345,
+        0.691574931
+      ],
+      "error_m": 0.40495974649510724
+    }
+  }
+}
