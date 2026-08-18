@@ -123,8 +123,50 @@ msckf::VioManagerOptions make_kaist_options() {
     options.feat_init_opt.max_dist = 10.0;
     options.feat_init_opt.max_baseline = 200.0;
     options.feat_init_opt.max_runs = 5;
-    // Matches upstream kaist_vio/estimator_config.yaml: try_zupt: false.
-    options.enable_zupt = false;
+    // ZUPT stays off here. Note that config/kaist_vio/estimator_config.yaml --
+    // and the config official is benchmarked with -- both say try_zupt: true;
+    // the comment that used to sit here claimed otherwise and was wrong. What
+    // matters for parity is not the ZUPT updates themselves but what official
+    // derives from them, which is the initialisation trigger below.
+    options.enable_zupt = std::getenv("VIO_ENABLE_ZUPT") != nullptr
+                              ? std::atoi(std::getenv("VIO_ENABLE_ZUPT")) != 0
+                              : false;
+
+    // Initialisation stays on the takeoff jerk (init_wait_for_jerk, default
+    // true). Initialising while still was tried on 2026-08-18 and measured
+    // worse; the note is here so it is not retried blind.
+    //
+    // The motivation was real. Official does not configure the trigger
+    // directly: VioManagerHelper.cpp:106 sets
+    // `wait_for_jerk = (updaterZUPT == nullptr)`, and the KAIST config it is
+    // benchmarked with has try_zupt: true, so official initialises on the first
+    // stationary window. DOD waits for accelerometer variance above
+    // init_imu_thresh=0.60 while the measured variance on circle.bag is 0.048,
+    // the noise floor of a stationary platform (VIO_INIT_DEBUG prints it), so
+    // the first pose lands at t+25.4 s against official's t+3.7 s. Note this is
+    // circle.bag alone -- infinite.bag already initialises at t+2.8 s.
+    //
+    // Flipping it does buy the coverage and does drain the pre-init feature
+    // accumulation (meas_overflow 182,939 -> 8,960 on circle), but the
+    // trajectory it produces is worse, and not merely because more of it is
+    // being scored. Compared over the window BOTH versions cover:
+    //
+    //                        circle            infinite
+    //   jerk-init (shipped)  0.0375            0.0261
+    //   still-init           0.0464            0.0363
+    //   still-init + ZUPT    0.0464            0.0321
+    //   official             0.0317            0.0283
+    //
+    // So the late initialisation is not what costs the accuracy on KAIST:
+    // starting earlier from a stationary window gives a worse state than
+    // starting later from an excited one, by ~24% on both sequences. Official
+    // beats us from a still start because it pairs that start with ZUPT
+    // configured as zupt_only_at_beginning + disparity-only gating
+    // (zupt_chi2_multipler: 0), neither of which this pipeline implements --
+    // our ZUPT runs for the whole sequence. That is the experiment worth
+    // running next, not the trigger on its own.
+    //
+    // VIO_ENABLE_ZUPT toggles ZUPT for that experiment; it stays off by default.
     // Official OpenVINS uses 50 SLAM landmarks for KAIST (max_slam: 50) --
     // persistent features that cut lap-to-lap drift -- and this was flipped on
     // to match, on the reasoning that the earlier crash belonged to a buggier

@@ -1,6 +1,8 @@
 #include "initialization.hpp"
 #include "../type/quat_ops.hpp"
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <algorithm>
 #include <map>
@@ -112,13 +114,25 @@ bool static_initialize(const InitializerOptions& config,
     a_var_2to1 = std::sqrt(a_var_2to1 / (count_2to1 - 1));
     
     double thresh = config.init_imu_thresh;
-    
+
+    // Why a static-init attempt was refused. Enabled with VIO_INIT_DEBUG,
+    // because "the initialiser has not fired yet" is otherwise indistinguishable
+    // from "the initialiser was never called".
+    static const bool init_debug = std::getenv("VIO_INIT_DEBUG") != nullptr;
+    const char* verdict = nullptr;
     if (wait_for_jerk) {
-        if (a_var_1to0 < thresh) return false;
-        if (a_var_2to1 > thresh) return false;
+        if (a_var_1to0 < thresh) verdict = "no-jerk";
+        else if (a_var_2to1 > thresh) verdict = "prior-window-moving";
     } else {
-        if (a_var_1to0 > thresh || a_var_2to1 > thresh) return false;
+        if (a_var_1to0 > thresh || a_var_2to1 > thresh) verdict = "moving";
     }
+    if (init_debug) {
+        std::fprintf(stderr, "[init-s] t=%.3f n1=%d n2=%d a_var_1to0=%.4f a_var_2to1=%.4f "
+                             "thresh=%.3f jerk=%d -> %s\n",
+                     newest_time, count_1to0, count_2to1, a_var_1to0, a_var_2to1,
+                     thresh, int(wait_for_jerk), verdict ? verdict : "ACCEPT");
+    }
+    if (verdict != nullptr) return false;
     
     Eigen::Vector3d z_axis = a_avg_2to1.normalized();
     Eigen::Matrix3d Ro = Eigen::Matrix3d::Identity();
