@@ -453,6 +453,14 @@ const double camera_timestamp = stamp(pair_left);
     std::fclose(estimate);
     std::fclose(truth);
     std::fclose(timing);
+    std::fprintf(stderr,
+        "[DB] full_refusals=%ld db_count=%zu slam_features=%d max_meas=%ld meas_overflow=%ld\n",
+        core::db_full_refusals, vio->db.count, vio->state.num_slam_features,
+        core::dbg_max_meas, core::feat_meas_overflow);
+    std::fprintf(stderr,
+        "[DROP] imu_evictions=%ld imu_stale=%ld imu_window_trunc=%ld unpropagated_frames=%ld\n",
+        msckf::imu_buffer_evictions, msckf::imu_stale_drops,
+        msckf::imu_window_truncations, msckf::frame_unpropagated_drops);
     std::fprintf(stderr, "complete frames=%llu initialized=%d tracking_mean_ms=%.6f estimator_mean_ms=%.6f\n",
         static_cast<unsigned long long>(frames), int(vio->is_initialized),
         frames ? tracking_sum / double(frames) : 0.0, frames ? estimator_sum / double(frames) : 0.0);

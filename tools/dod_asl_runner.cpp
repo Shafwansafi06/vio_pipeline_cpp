@@ -346,7 +346,15 @@ int main(int argc, char** argv) {
                  core::dbg_max_meas, core::dbg_max_count,
                  double(core::dbg_shift_elems) / double(frames ? frames : 1),
                  double(core::dbg_compact_elems) / double(frames ? frames : 1));
-    std::fprintf(stderr, "[DB] full_refusals=%ld db_count=%zu slam_features=%d\n",
-                 core::db_full_refusals, vio->db.count, vio->state.num_slam_features);
+    std::fprintf(stderr,
+                 "[DB] full_refusals=%ld db_count=%zu slam_features=%d max_meas=%ld meas_overflow=%ld\n",
+                 core::db_full_refusals, vio->db.count, vio->state.num_slam_features,
+                 core::dbg_max_meas, core::feat_meas_overflow);
+    // Every one of these is data the pipeline threw away. All zero is the
+    // expected result on a healthy bag; nonzero says which bound is binding.
+    std::fprintf(stderr,
+                 "[DROP] imu_evictions=%ld imu_stale=%ld imu_window_trunc=%ld unpropagated_frames=%ld\n",
+                 msckf::imu_buffer_evictions, msckf::imu_stale_drops,
+                 msckf::imu_window_truncations, msckf::frame_unpropagated_drops);
     return vio->is_initialized ? 0 : 8;
 }

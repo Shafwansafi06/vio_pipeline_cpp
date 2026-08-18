@@ -21,6 +21,21 @@ static core::ImuData interpolate_data(const core::ImuData& imu_1, const core::Im
     return data;
 }
 
+// Times an IMU reading that belonged in a propagation window was discarded
+// because the caller's scratch array was full. Every one of these means the
+// window handed to the integrator is shorter than the interval it claims to
+// cover, so the callers below refuse a saturated window outright rather than
+// integrating part of it and reporting success.
+long imu_window_truncations = 0;
+
+// One propagation window is bounded by the interval between two camera frames,
+// which is 50 ms at EuRoC's 20 Hz and never more than a few hundred ms on any
+// shipped config; at 200 Hz IMU that is 10 samples, and 2000 is 10 s of IMU.
+// The bound exists to keep the scratch array on the stack, not because the
+// window is expected to approach it. A saturated window is therefore a fault,
+// not a working limit -- see the refusals at each call site.
+constexpr int PROP_WINDOW_CAPACITY = 2000;
+
 int select_imu_readings(const core::ImuData* imu_data, int imu_count,
                                double time0, double time1,
                                core::ImuData* selected_out, int max_out_capacity) {
@@ -34,14 +49,14 @@ int select_imu_readings(const core::ImuData* imu_data, int imu_count,
         if (next_m.timestamp > time0 && curr.timestamp < time0) {
             if (count < max_out_capacity) {
                 selected_out[count++] = interpolate_data(curr, next_m, time0);
-            }
+            } else { ++imu_window_truncations; }
             continue;
         }
         
         if (curr.timestamp >= time0 && next_m.timestamp <= time1) {
             if (count < max_out_capacity) {
                 selected_out[count++] = curr;
-            }
+            } else { ++imu_window_truncations; }
             continue;
         }
         
@@ -51,17 +66,17 @@ int select_imu_readings(const core::ImuData* imu_data, int imu_count,
             } else if (curr.timestamp > time1) {
                 if (i > 0 && count < max_out_capacity) {
                     selected_out[count++] = interpolate_data(imu_data[i-1], curr, time1);
-                }
+                } else if (i > 0) { ++imu_window_truncations; }
             } else {
                 if (count < max_out_capacity) {
                     selected_out[count++] = curr;
-                }
+                } else { ++imu_window_truncations; }
             }
             
             if (count == 0 || selected_out[count - 1].timestamp != time1) {
                 if (count < max_out_capacity) {
                     selected_out[count++] = interpolate_data(curr, next_m, time1);
-                }
+                } else { ++imu_window_truncations; }
             }
             break;
         }
@@ -75,7 +90,7 @@ int select_imu_readings(const core::ImuData* imu_data, int imu_count,
     if (selected_out[count - 1].timestamp != time1) {
         if (count < max_out_capacity) {
             selected_out[count++] = interpolate_data(imu_data[imu_count - 2], imu_data[imu_count - 1], time1);
-        }
+        } else { ++imu_window_truncations; }
     }
 
     // Zero-dt removal. Official erases the EARLIER reading of the pair and
@@ -99,7 +114,12 @@ void init_propagator(PropagatorData& prop, const PropagatorNoises& noises, doubl
 }
 
 bool propagate_and_clone(PropagatorData& prop, State& state, double timestamp, const core::ImuData* imu_data, int imu_count) {
-    if (state.timestamp == timestamp) return false;
+    // Refuse any frame that does not advance the state, not just one that
+    // repeats it exactly. A stamp that goes backwards makes time1 < time0, and
+    // select_imu_readings() below then returns a window running the wrong way;
+    // the integration that follows is meaningless rather than merely short.
+    // The caller counts the refusal (frame_unpropagated_drops).
+    if (timestamp <= state.timestamp) return false;
     
     if (!prop.have_last_prop_time_offset) {
         prop.last_prop_time_offset = state.calib_dt_CAMtoIMU.value[0];
@@ -110,8 +130,14 @@ bool propagate_and_clone(PropagatorData& prop, State& state, double timestamp, c
     double time0 = state.timestamp + prop.last_prop_time_offset;
     double time1 = timestamp + t_off_new;
     
-    core::ImuData prop_data[2000];
-    int prop_count = select_imu_readings(imu_data, imu_count, time0, time1, prop_data, 2000);
+    core::ImuData prop_data[PROP_WINDOW_CAPACITY];
+    int prop_count = select_imu_readings(imu_data, imu_count, time0, time1, prop_data,
+                                         PROP_WINDOW_CAPACITY);
+    // A window that filled the scratch array was truncated: the readings past
+    // the bound were dropped, so integrating what is left would advance the
+    // state by less than the interval it is being asked to cover, while
+    // reporting success.
+    if (prop_count >= PROP_WINDOW_CAPACITY) return false;
     
     int dim = imu_intrinsic_size(state) + 15;
     assert(dim <= MAX_IMU_ERROR_STATE_SIZE);
@@ -194,8 +220,14 @@ bool propagate_only(PropagatorData& prop, State& state, double timestamp, const 
     double time0 = state.timestamp + prop.last_prop_time_offset;
     double time1 = timestamp + t_off_new;
     
-    core::ImuData prop_data[2000];
-    int prop_count = select_imu_readings(imu_data, imu_count, time0, time1, prop_data, 2000);
+    core::ImuData prop_data[PROP_WINDOW_CAPACITY];
+    int prop_count = select_imu_readings(imu_data, imu_count, time0, time1, prop_data,
+                                         PROP_WINDOW_CAPACITY);
+    // A window that filled the scratch array was truncated: the readings past
+    // the bound were dropped, so integrating what is left would advance the
+    // state by less than the interval it is being asked to cover, while
+    // reporting success.
+    if (prop_count >= PROP_WINDOW_CAPACITY) return false;
     
     if (prop_count < 2) return false;
     
@@ -789,8 +821,14 @@ bool initialize_covariance(PropagatorData& prop, State& state, double timestamp,
     double time0 = state.timestamp + prop.last_prop_time_offset;
     double time1 = timestamp + state.calib_dt_CAMtoIMU.value[0];
     
-    core::ImuData prop_data[2000];
-    int prop_count = select_imu_readings(imu_data, imu_count, time0, time1, prop_data, 2000);
+    core::ImuData prop_data[PROP_WINDOW_CAPACITY];
+    int prop_count = select_imu_readings(imu_data, imu_count, time0, time1, prop_data,
+                                         PROP_WINDOW_CAPACITY);
+    // A window that filled the scratch array was truncated: the readings past
+    // the bound were dropped, so integrating what is left would advance the
+    // state by less than the interval it is being asked to cover, while
+    // reporting success.
+    if (prop_count >= PROP_WINDOW_CAPACITY) return false;
     
     if (prop_count < 2) return false;
     

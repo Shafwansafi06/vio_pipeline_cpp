@@ -17,6 +17,7 @@ long tri_reject_maxdist = 0;
 long tri_reject_nan = 0;
 long tri_accept = 0;
 long db_full_refusals = 0;
+long feat_meas_overflow = 0;
 long tri_reject_cond_meas = 0;
 long tri_accept_meas = 0;
 long tri_cond_hist[32] = {0};
@@ -84,11 +85,17 @@ void update_feature(FeatureDatabase& db, int feat_id, double timestamp, int cam_
         if (feat.num_measurements < FEATURE_MAX_MEASUREMENTS) {
             feat.measurements[feat.num_measurements++] = {cam_id, timestamp, Eigen::Vector2d(u, v), Eigen::Vector2d(u_n, v_n)};
             if (feat.num_measurements > dbg_max_meas) dbg_max_meas = feat.num_measurements;
+        } else {
+            // The array is full and this observation is thrown away. Measured
+            // nonzero on both KAIST sequences -- see the sizing note on
+            // FEATURE_MAX_MEASUREMENTS for why, and why the fix is the
+            // initialisation latency rather than a bigger array.
+            ++feat_meas_overflow;
         }
         return;
     }
     
-    if (db.count >= 2048) {
+    if (db.count >= FEATURE_DB_CAPACITY) {
         // Silently refusing new features once full is not the same as
         // official, whose database is an unbounded map pruned by age. If this
         // fires the tracker is effectively capped and tracks cannot be
@@ -108,7 +115,7 @@ void update_feature(FeatureDatabase& db, int feat_id, double timestamp, int cam_
     if (db.num_free > 0) {
         slot = db.free_slots[--db.num_free];
     } else {
-        if (db.num_slots_used >= 2048) { ++db_full_refusals; return; }
+        if (db.num_slots_used >= FEATURE_DB_CAPACITY) { ++db_full_refusals; return; }
         slot = db.num_slots_used++;
     }
 
@@ -645,7 +652,7 @@ bool single_gaussnewton(Feature& feat, const ClonesCamera& clones, const Feature
 }
 
 bool compute_disparity(const FeatureDatabase& db, double newest_time, double oldest_time, double& mean, double& var, int& count) {
-    double disparities[2048 * 2];
+    double disparities[FEATURE_DB_CAPACITY * 2];
     int disparities_count = 0;
     
     for (int i = 0; i < (int)db.count; ++i) {
@@ -711,7 +718,7 @@ bool compute_disparity(const FeatureDatabase& db, double newest_time, double old
 }
 
 bool compute_disparity_two_frames(const FeatureDatabase& db, double time0, double time1, double& mean, double& var, int& count) {
-    double disparities[2048 * 2];
+    double disparities[FEATURE_DB_CAPACITY * 2];
     int disparities_count = 0;
     
     for (int i = 0; i < (int)db.count; ++i) {

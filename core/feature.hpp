@@ -8,6 +8,8 @@ extern long tri_reject_cond, tri_reject_mindist, tri_reject_maxdist, tri_reject_
 extern long gn_reject_dist, gn_reject_baseline, gn_accept;
 extern long tri_reject_cond_meas, tri_accept_meas;
 extern long db_full_refusals;
+// Measurements discarded because a feature's array was already full.
+extern long feat_meas_overflow;
 extern long dbg_max_meas, dbg_max_count, dbg_shift_elems, dbg_compact_elems;
 extern long tri_cond_hist[32], tri_accept_hist[32];
 
@@ -31,11 +33,30 @@ struct FeatureMeasurement {
     Eigen::Vector2d uv_norm;
 };
 
-// A feature can hold at most one measurement per camera per live clone, plus
-// the frame being processed: 2 * max_clone_size + 2. The shipped window is 11
-// clones, so 24 -- measured, and exactly what the tracker produces. The array
-// was 48, i.e. 2x the reachable bound, which doubled sizeof(Feature) and every
-// scan over the database. init_state() validates max_clone_size against this.
+// Once the filter is running, a feature holds at most one measurement per
+// camera per live clone plus the frame being processed: 2 * max_clone_size + 2,
+// which is 24 for the shipped 11-clone window. Measured 2026-08-18 over the ten
+// sequences, peak observed measurements per feature (dbg_max_meas):
+//
+//   all eight EuRoC sequences   24   <- exactly the clone-derived bound
+//   KAIST circle, KAIST infinity 48   <- SATURATED, measurements were dropped
+//
+// KAIST exceeds the bound because measurements are only pruned when a clone is
+// marginalised, and before initialisation there are no clones: a feature the
+// tracker holds across the pre-init stretch accumulates one measurement per
+// camera per frame with nothing to trim it. DOD initialises at t+25.4 s on
+// KAIST circle against official's t+3.7 s, so KAIST spends long enough there to
+// fill the array; EuRoC initialises inside 2 s and never approaches it.
+//
+// So this is 2x the *post-init* bound and NOT slack that can be reclaimed: an
+// earlier attempt to cut it to 24 (whose comment survived here for a while
+// claiming the cut had been made) would have truncated KAIST's pre-init
+// accumulation harder than it already is. Cutting it is worth ~1.2 kB per
+// feature and halves every database scan, but it is blocked on the
+// initialisation latency, not on this constant. update_feature() counts the
+// drops as feat_meas_overflow so the saturation is visible rather than silent.
+//
+// init_state() validates max_clone_size against FEATURE_MAX_CLONES_SUPPORTED.
 constexpr int FEATURE_MAX_MEASUREMENTS = 48;
 constexpr int FEATURE_MAX_CLONES_SUPPORTED = (FEATURE_MAX_MEASUREMENTS - 2) / 2;
 
@@ -68,10 +89,18 @@ struct Feature {
 //
 // Access live feature k (0 <= k < count) with feature_at(db, k), never
 // db.features[k] -- the latter is a storage slot, not a logical position.
+// Measured peak occupancy over the ten-sequence sweep is 250 live features
+// (MH_04); the tracker is configured for 200 per camera and the database holds
+// the union across cameras plus whatever has not yet been marginalised. 2048 is
+// therefore ~8x the observed peak, and db_full_refusals has been zero on every
+// sequence. It is not sized down because the cost of the slack is address space,
+// not bandwidth: every scan runs over `count`, never over the capacity.
+constexpr int FEATURE_DB_CAPACITY = 2048;
+
 struct FeatureDatabase {
-    Feature features[2048];
-    int order[2048];
-    int free_slots[2048];
+    Feature features[FEATURE_DB_CAPACITY];
+    int order[FEATURE_DB_CAPACITY];
+    int free_slots[FEATURE_DB_CAPACITY];
     int num_free = 0;
     int num_slots_used = 0;
     std::size_t count = 0;

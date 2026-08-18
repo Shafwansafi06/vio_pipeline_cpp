@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include "state_helper.hpp"
 #include "hover_detector.hpp"
 
@@ -11,11 +13,23 @@ namespace msckf {
 long cls_frames = 0, cls_lost = 0, cls_marginal = 0, cls_maxtrack = 0;
 long cls_slam_update = 0, cls_db_count = 0;
 long cls_retire_untracked = 0, cls_retire_chi2 = 0;
+// Input-path rejections. See the header for why each one means data was lost.
+long imu_buffer_evictions = 0, imu_stale_drops = 0, frame_unpropagated_drops = 0;
 double stage_ms_propagate = 0.0, stage_ms_msckf = 0.0, stage_ms_slam = 0.0,
        stage_ms_slam_delayed = 0.0, stage_ms_marg = 0.0, stage_ms_db = 0.0,
        stage_ms_classify = 0.0;
 
 namespace {
+
+// Per-frame scratch capacities. FRAME_MAX_FEATURES bounds the classifier's
+// per-bucket arrays and matches the feature database's own capacity, so a
+// bucket can hold every feature the database can: the buckets partition the
+// database, they never exceed it. FRAME_MAX_SLAM bounds the per-frame SLAM
+// working arrays; init_vio_manager asserts max_slam_features against it, since
+// nothing else ties the two together.
+constexpr int FRAME_MAX_FEATURES = core::FEATURE_DB_CAPACITY;
+constexpr int FRAME_MAX_SLAM = 64;
+
 // Accumulates the wall time of the scope it is declared in.
 struct StageTimer {
     double* sink;
@@ -41,6 +55,17 @@ void init_vio_manager(VioManagerData& vio, const VioManagerOptions& params) {
     init_propagator(vio.prop, params.noises, params.gravity_mag);
     init_hover_detector(vio.hover_detector, params.hover_opt);
 
+    // The per-frame SLAM arrays are sized independently of the state's own
+    // landmark capacity, and nothing but this check ties them together. Fail
+    // at init rather than silently updating a subset of the landmarks.
+    if (params.state_opt.max_slam_features > FRAME_MAX_SLAM) {
+        std::fprintf(stderr,
+                     "init_vio_manager: max_slam_features=%d exceeds FRAME_MAX_SLAM=%d; "
+                     "per-frame SLAM updates would silently drop landmarks\n",
+                     params.state_opt.max_slam_features, FRAME_MAX_SLAM);
+        std::exit(1);
+    }
+
     StateOptions opt = params.state_opt;
     opt.num_cameras = params.num_cameras;
     
@@ -64,16 +89,46 @@ void init_vio_manager(VioManagerData& vio, const VioManagerOptions& params) {
 }
 
 void feed_measurement_imu(VioManagerData& vio, const core::ImuData& message) {
-    if (vio.imu_count < 10000) {
-        // Keep sorted by timestamp
-        int insert_idx = vio.imu_count;
-        while (insert_idx > 0 && vio.imu_buffer[insert_idx - 1].timestamp > message.timestamp) {
-            vio.imu_buffer[insert_idx] = vio.imu_buffer[insert_idx - 1];
-            insert_idx--;
-        }
-        vio.imu_buffer[insert_idx] = message;
-        vio.imu_count++;
+    constexpr int kCapacity = VioManagerData::IMU_BUFFER_CAPACITY;
+
+    // A full buffer evicts the OLDEST sample, not the newest. Dropping the
+    // newest is what the bound used to do, and it is the wrong direction: the
+    // buffer is only trimmed once the filter is initialised, so a run whose
+    // initialiser had not yet fired after kCapacity samples froze holding a
+    // window that could never advance to meet the incoming camera frames. The
+    // filter could then never initialise, silently and permanently. Evicting
+    // the oldest degrades to a sliding window instead, which is what every
+    // consumer of the buffer already expects.
+    // ponytail: evict a quarter of the window at once rather than one sample
+    // per call, so the shift is amortised O(1) instead of O(kCapacity) per
+    // sample. A ring buffer would avoid the shift entirely, but every consumer
+    // of imu_buffer indexes it linearly; that refactor is only worth doing if
+    // this path is ever measured to be hot, and on a healthy run it never
+    // executes at all.
+    bool evicted = false;
+    if (vio.imu_count >= kCapacity) {
+        constexpr int kEvict = kCapacity / 4;
+        for (int i = kEvict; i < vio.imu_count; ++i) vio.imu_buffer[i - kEvict] = vio.imu_buffer[i];
+        vio.imu_count -= kEvict;
+        imu_buffer_evictions += kEvict;
+        evicted = true;
     }
+
+    // Keep sorted by timestamp
+    int insert_idx = vio.imu_count;
+    while (insert_idx > 0 && vio.imu_buffer[insert_idx - 1].timestamp > message.timestamp) {
+        vio.imu_buffer[insert_idx] = vio.imu_buffer[insert_idx - 1];
+        insert_idx--;
+    }
+    // A sample older than everything still held is one the eviction just
+    // walked past. Re-inserting it at the front would make the window jump
+    // backwards for every later propagation.
+    if (evicted && insert_idx == 0) {
+        ++imu_stale_drops;
+        return;
+    }
+    vio.imu_buffer[insert_idx] = message;
+    vio.imu_count++;
 }
 
 void feed_measurement_camera_tracks(VioManagerData& vio, double timestamp, const core::Feature* tracks, int track_count) {
@@ -107,8 +162,23 @@ void feed_measurement_camera_tracks(VioManagerData& vio, double timestamp, const
         const double previous_clone_timestamp =
             vio.state.num_clones > 0 ? vio.state.clones_IMU[vio.state.num_clones - 1].timestamp : -1.0;
 
-        // Standard MSCKF step: Propagate IMU and augment clone
-        { StageTimer stage_timer(msckf::stage_ms_propagate); propagate_and_clone(vio.prop, vio.state, timestamp, vio.imu_buffer, vio.imu_count); }
+        // Standard MSCKF step: Propagate IMU and augment clone.
+        //
+        // The return value is not decoration. propagate_and_clone() refuses a
+        // frame whose timestamp does not advance the state, and refusing means
+        // no clone was appended. Running the rest of the frame anyway -- the
+        // classifier, the MSCKF and SLAM updates, marginalisation -- would
+        // update against a state that was never propagated to this timestamp
+        // and against a clone window that does not contain it. Bag playback is
+        // monotonic so this never fires there; a live feed that repeats or
+        // reorders a stamp does.
+        bool propagated = false;
+        { StageTimer stage_timer(msckf::stage_ms_propagate);
+          propagated = propagate_and_clone(vio.prop, vio.state, timestamp, vio.imu_buffer, vio.imu_count); }
+        if (!propagated) {
+            ++frame_unpropagated_drops;
+            return;
+        }
 
         // Hovering classifier (Kottas, Wu & Roumeliotis): rotation-compensated
         // bearing-vector residual between the two most recent clones, with
@@ -133,18 +203,18 @@ void feed_measurement_camera_tracks(VioManagerData& vio, double timestamp, const
         // long-lived enough / SLAM capacity full), new SLAM candidates
         // (long-lived enough and there's room), and existing SLAM landmarks
         // needing their per-frame update.
-        core::Feature* lost_features[2048];
-        core::Feature* marginal_features[2048];
-        core::Feature* maxtrack_features[2048];
-        core::Feature* slam_update_features[64];
+        core::Feature* lost_features[FRAME_MAX_FEATURES];
+        core::Feature* marginal_features[FRAME_MAX_FEATURES];
+        core::Feature* maxtrack_features[FRAME_MAX_FEATURES];
+        core::Feature* slam_update_features[FRAME_MAX_SLAM];
         // Feature IDS as well as pointers. cleanup_db() compacts
         // vio.db.features[] in place between the updates below, which
         // invalidates every pointer captured here; the ids stay valid and are
         // re-resolved at each use. Keeping the cleanups matters -- they are
         // what stops a feature already consumed by one updater from being
         // consumed again by the next in the same frame.
-        int slam_update_ids[64];
-        static int maxtrack_ids[2048];
+        int slam_update_ids[FRAME_MAX_SLAM];
+        static int maxtrack_ids[FRAME_MAX_FEATURES];
         int lost_count = 0, marginal_count = 0, maxtrack_count = 0, slam_update_count = 0;
         const bool clones_full = vio.state.num_clones > vio.state.options.max_clone_size;
         // The clone actually about to be dropped differs by mode: FIFO drops
@@ -172,7 +242,7 @@ void feed_measurement_camera_tracks(VioManagerData& vio, double timestamp, const
                 }
             }
             if (is_slam) {
-                if (feat.num_measurements >= 1 && slam_update_count < 64) {
+                if (feat.num_measurements >= 1 && slam_update_count < FRAME_MAX_SLAM) {
                     slam_update_ids[slam_update_count] = feat.featid;
                     slam_update_features[slam_update_count++] = &feat;
                 }
@@ -214,7 +284,7 @@ void feed_measurement_camera_tracks(VioManagerData& vio, double timestamp, const
                 (vio.slam_start_time < 0.0) || (timestamp - vio.slam_start_time >= vio.params.dt_slam_delay);
             if (vio.params.enable_slam && slam_delay_passed && contains_marginal && reached_max &&
                 vio.state.num_slam_features + maxtrack_count < vio.state.options.max_slam_features &&
-                maxtrack_count < 2048) {
+                maxtrack_count < FRAME_MAX_FEATURES) {
                 maxtrack_ids[maxtrack_count] = feat.featid;
                 maxtrack_features[maxtrack_count++] = &feat;
             } else if (is_lost) {
@@ -224,7 +294,7 @@ void feed_measurement_camera_tracks(VioManagerData& vio, double timestamp, const
             }
         }
 
-        core::Feature* msckf_features[2048];
+        core::Feature* msckf_features[FRAME_MAX_FEATURES];
         int msckf_count = 0;
         for (int i = 0; i < lost_count; ++i) msckf_features[msckf_count++] = lost_features[i];
         for (int i = 0; i < marginal_count; ++i) msckf_features[msckf_count++] = marginal_features[i];
@@ -246,9 +316,9 @@ void feed_measurement_camera_tracks(VioManagerData& vio, double timestamp, const
         // that were just successfully updated, and retires them. Official makes
         // this determination against the tracker database up front, before its
         // updates, which is what this reproduces.
-        bool slam_still_tracked[64] = {false};
+        bool slam_still_tracked[FRAME_MAX_SLAM] = {false};
         const int slam_count_snapshot = vio.state.num_slam_features;
-        for (int s = 0; s < slam_count_snapshot && s < 64; ++s) {
+        for (int s = 0; s < slam_count_snapshot && s < FRAME_MAX_SLAM; ++s) {
             slam_still_tracked[s] = (core::get_feature(vio.db, vio.state.features_SLAM[s].feat_id) != nullptr);
         }
 
@@ -302,9 +372,9 @@ void feed_measurement_camera_tracks(VioManagerData& vio, double timestamp, const
                 // Re-resolve by feature id. cleanup_db() above compacted
                 // vio.db.features[] in place, so the pointers captured during
                 // classification no longer refer to the intended features.
-                core::Feature* resolved[64];
+                core::Feature* resolved[FRAME_MAX_SLAM];
                 int resolved_count = 0;
-                for (int i = 0; i < slam_update_count && resolved_count < 64; ++i) {
+                for (int i = 0; i < slam_update_count && resolved_count < FRAME_MAX_SLAM; ++i) {
                     core::Feature* f = core::get_feature(vio.db, slam_update_ids[i]);
                     if (f) resolved[resolved_count++] = f;
                 }
@@ -333,7 +403,7 @@ void feed_measurement_camera_tracks(VioManagerData& vio, double timestamp, const
         if (maxtrack_count > 0) {
                 // Same re-resolution as above; these pointers predate two
                 // cleanup_db() compactions.
-                static core::Feature* resolved_mt[2048];
+                static core::Feature* resolved_mt[FRAME_MAX_FEATURES];
                 int resolved_mt_count = 0;
                 for (int i = 0; i < maxtrack_count && resolved_mt_count < 2048; ++i) {
                     core::Feature* f = core::get_feature(vio.db, maxtrack_ids[i]);
@@ -352,7 +422,7 @@ void feed_measurement_camera_tracks(VioManagerData& vio, double timestamp, const
             // taken before the updates -- see the comment there.
             for (int s = 0; s < vio.state.num_slam_features; ++s) {
                 type::Variable& lm = vio.state.features_SLAM[s];
-                const bool tracked = (s < slam_count_snapshot && s < 64) ? slam_still_tracked[s] : true;
+                const bool tracked = (s < slam_count_snapshot && s < FRAME_MAX_SLAM) ? slam_still_tracked[s] : true;
                 if (!tracked) ++cls_retire_untracked;
                 else if (lm.update_fail_count > 1) ++cls_retire_chi2;
                 if (!tracked || lm.update_fail_count > 1) lm.should_marg = true;

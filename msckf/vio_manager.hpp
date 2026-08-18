@@ -14,6 +14,11 @@ namespace msckf {
 extern long cls_frames, cls_lost, cls_marginal, cls_maxtrack, cls_slam_update, cls_db_count;
 extern long cls_retire_untracked, cls_retire_chi2;
 
+// Rejections on the measurement-input path, defined in vio_manager.cpp. Every
+// one of these means data was thrown away; a nonzero value in a run that used
+// to report zero is the signal that a bound is now binding.
+extern long imu_buffer_evictions, imu_stale_drops, frame_unpropagated_drops;
+
 // Per-stage accumulated wall time (ms), mirroring official OpenVINS's
 // record_timing_information columns so the two can be compared stage by stage.
 extern double stage_ms_propagate, stage_ms_msckf, stage_ms_slam, stage_ms_slam_delayed, stage_ms_marg,
@@ -86,7 +91,16 @@ struct VioManagerData {
     UpdaterZeroVelocityData updater_zupt;
     HoverDetectorData hover_detector;
     core::FeatureDatabase db;
-    core::ImuData imu_buffer[10000];
+    // 50 s of EuRoC IMU at 200 Hz. The buffer only has to span the time from
+    // the oldest live clone to now (trimmed every frame in
+    // feed_measurement_camera_tracks), plus, before initialisation, whatever
+    // window the initialiser needs -- init_opt.init_window_time, 2 s in every
+    // shipped config. 50 s is two orders of magnitude of headroom on both, and
+    // overflow now evicts the oldest sample rather than refusing the newest,
+    // so a long pre-init stretch degrades to a sliding window instead of
+    // freezing the buffer permanently.
+    static constexpr int IMU_BUFFER_CAPACITY = 10000;
+    core::ImuData imu_buffer[IMU_BUFFER_CAPACITY];
     int imu_count = 0;
     bool is_initialized = false;
     double initialized_time = -1.0;

@@ -6,6 +6,11 @@
 namespace msckf {
 
 constexpr int MAX_IMU_ERROR_STATE_SIZE = IMU_ERROR_STATE_CAPACITY;
+
+// Times a propagation window lost readings to the scratch-array bound. Defined
+// in propagator.cpp; nonzero means an integration interval was truncated and
+// the frame refused.
+extern long imu_window_truncations;
 using ImuTransitionMatrix = Eigen::Matrix<double, MAX_IMU_ERROR_STATE_SIZE,
                                           MAX_IMU_ERROR_STATE_SIZE>;
 using ImuNoiseJacobian = Eigen::Matrix<double, MAX_IMU_ERROR_STATE_SIZE, 12>;
