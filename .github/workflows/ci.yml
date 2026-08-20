@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "research/**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    # Builds the core estimator (no ROS, no OpenCV) and runs the five
+    # verify_* tests that CLAUDE.md and dod-style treat as the accuracy
+    # gate's foundation -- allocation-free propagation, clone invariants,
+    # feature-database lifetime, SLAM Jacobians, and dynamic init.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure
+
+  build-frontend:
+    # The OpenCV-dependent tracker and the ROS-free ASL runner
+    # (tools/dod_asl_runner.cpp) -- built separately since they pull in
+    # libopencv-dev, which the core-only job above does not need.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OpenCV
+        run: sudo apt-get update && sudo apt-get install -y libopencv-dev
+
+      - name: Configure
+        run: >
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          -DVIO_BUILD_OPENCV_FRONTEND=ON
+          -DVIO_BUILD_ASL_RUNNER=ON
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)" --target dod_asl_runner

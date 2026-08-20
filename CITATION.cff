@@ -1,0 +1,39 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "vio_pipeline_cpp: A Data-Oriented C++ MSCKF Visual-Inertial Odometry Pipeline"
+type: software
+authors:
+  - family-names: Safi
+    given-names: Shafwan
+    affiliation: "Indian Institute of Science Education and Research (IISER) Bhopal"
+    email: shafwansafi06@gmail.com
+  - family-names: Vashista
+    given-names: Nikhil
+    affiliation: "Indian Institute of Science Education and Research (IISER) Bhopal"
+license: BSD-3-Clause
+repository-code: "https://github.com/Shafwansafi06/vio_pipeline_cpp"
+version: 0.1.0
+date-released: "2026-08-18"
+keywords:
+  - visual-inertial odometry
+  - MSCKF
+  - data-oriented design
+  - robotics
+  - state estimation
+references:
+  - type: conference-paper
+    authors:
+      - family-names: Geneva
+        given-names: Patrick
+      - family-names: Eckenhoff
+        given-names: Kevin
+      - family-names: Lee
+        given-names: Woosik
+      - family-names: Yang
+        given-names: Yulin
+      - family-names: Huang
+        given-names: Guoquan
+    title: "OpenVINS: A Research Platform for Visual-Inertial Estimation"
+    year: 2020
+    conference:
+      name: "IEEE International Conference on Robotics and Automation (ICRA)"

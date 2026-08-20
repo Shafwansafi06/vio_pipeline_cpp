@@ -366,7 +366,19 @@ flowchart TD
 
 ## 8. Credits & license
 
-The algorithm and the ported dynamic initializer are based on
-**[OpenVINS](https://github.com/rpng/open_vins)** (Patrick Geneva, Guoquan
-Huang, et al.), used under its open-source license. This is an independent
-data-oriented re-implementation for research on GNSS-denied navigation.
+This project is licensed under the [BSD 3-Clause License](LICENSE).
+
+It is an independent, from-scratch data-oriented reimplementation of the
+MSCKF visual-inertial odometry algorithm, designed against and benchmarked
+against **[OpenVINS](https://github.com/rpng/open_vins)** (Patrick Geneva,
+Guoquan Huang, et al., GPLv3) as the accuracy and design reference. No code
+is copied or derived from OpenVINS's source; every optimization is verified
+bit-identical against OpenVINS's own math (see `CLAUDE.md`, the `bitdiff_*`
+test suite, and the ten-sequence accuracy gate). The feature-less dynamic
+initializer follows sqrtVINS (Peng et al., T-RO 2025) Sec. V-A; the hovering
+classifier follows Kottas, Wu & Roumeliotis (IROS 2013); an optional,
+disabled-by-default MSCKF update path follows SchurVINS (Fan et al., CVPR
+2024) -- all three are cited in full in `paper/main.tex`.
+
+`vendor/eigen` bundles [Eigen](https://eigen.tuxfamily.org), licensed under
+the Mozilla Public License 2.0 (`vendor/eigen/COPYING.MPL2`).

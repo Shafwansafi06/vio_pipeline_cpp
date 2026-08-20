@@ -26,17 +26,26 @@ DOD_COLOR = "#d62728"
 OV_COLOR = "#1f77b4"
 
 # label -> (dod prefix, official estimate stem, dataset)
+#
+# Matches the reeval_20260817/ naming, where DOD, official and ground truth
+# all share one base name (SEQ_estimate.csv, SEQ_ov_estimate.csv,
+# SEQ_groundtruth.csv) -- both estimators scored off the identical rosbag
+# transport and the identical ground truth, per CLAUDE.md's same-transport
+# rule. Previous entries here (OK_MH_01/ov_mh01/K_circle/...) pointed at an
+# older, ASL-transport run directory and are stale; V1_* under that naming
+# never had valid ground truth (see the V1 groundtruth-topic fix in
+# 1ec3389), so any plot made with the old tuple silently miscompares.
 SEQUENCES = [
-    ("MH_01_easy", "OK_MH_01", "ov_mh01", "EuRoC"),
-    ("MH_02_easy", "OK_MH_02", "ov_MH_02_easy", "EuRoC"),
-    ("MH_03_medium", "OK_MH_03", "ov_MH_03_medium", "EuRoC"),
-    ("MH_04_difficult", "OK_MH_04", "ov_MH_04_difficult", "EuRoC"),
-    ("MH_05_difficult", "OK_MH_05", "ov_MH_05_difficult", "EuRoC"),
-    ("V1_01_easy", "OK_V1_01", "ov_V1_01_easy", "EuRoC"),
-    ("V1_02_medium", "OK_V1_02", "ov_V1_02_medium", "EuRoC"),
-    ("V1_03_difficult", "OK_V1_03", "ov_V1_03_difficult", "EuRoC"),
-    ("KAIST circle", "K_circle", "ov_circle", "KAIST"),
-    ("KAIST infinity", "K_inf", "ov_infinity", "KAIST"),
+    ("MH_01_easy", "MH_01_easy", "MH_01_easy_ov", "EuRoC"),
+    ("MH_02_easy", "MH_02_easy", "MH_02_easy_ov", "EuRoC"),
+    ("MH_03_medium", "MH_03_medium", "MH_03_medium_ov", "EuRoC"),
+    ("MH_04_difficult", "MH_04_difficult", "MH_04_difficult_ov", "EuRoC"),
+    ("MH_05_difficult", "MH_05_difficult", "MH_05_difficult_ov", "EuRoC"),
+    ("V1_01_easy", "V1_01_easy", "V1_01_easy_ov", "EuRoC"),
+    ("V1_02_medium", "V1_02_medium", "V1_02_medium_ov", "EuRoC"),
+    ("V1_03_difficult", "V1_03_difficult", "V1_03_difficult_ov", "EuRoC"),
+    ("KAIST circle", "KAIST_circle", "KAIST_circle_ov", "KAIST"),
+    ("KAIST infinity", "KAIST_infinity", "KAIST_infinity_ov", "KAIST"),
 ]
 
 

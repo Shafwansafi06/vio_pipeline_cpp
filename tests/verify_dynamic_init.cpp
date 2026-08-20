@@ -41,7 +41,21 @@ int main() {
     Eigen::Matrix3d R_GtoI0 = Exp_so3(Eigen::Vector3d(0.2, -0.3, 0.1));
 
     // JPL kinematics: dR_GtoI/dt = -[w]x R_GtoI  =>  R_GtoI(t) = Exp(-w t) R_GtoI0
-    auto R_GtoI = [&](double t) { return Exp_so3(-omega * t) * R_GtoI0; };
+    //
+    // .eval() is not optional here, unlike it might look next to v_G/p_G
+    // below. Exp_so3(...) * R_GtoI0 is an Eigen Product<> expression that
+    // holds a reference to the Exp_so3(...) return value, which is a
+    // temporary destroyed at the end of this return statement -- without
+    // .eval(), the lambda returns a Product<> object referencing already-
+    // freed memory. This is undefined behaviour, not a numerical precision
+    // issue: it happened to read back correct-looking values on one
+    // toolchain/build and produced a zero matrix (Rk(0) came back exactly
+    // 0, not R_GtoI0, confirmed by direct inspection) on another, which
+    // then cascaded into most of the test's 16 synthetic features never
+    // registering a single valid projection. v_G and p_G already call
+    // .eval() for exactly this reason; R_GtoI was the one lambda missing
+    // it.
+    auto R_GtoI = [&](double t) { return (Exp_so3(-omega * t) * R_GtoI0).eval(); };
     auto v_G = [&](double t) { return (v0_G + a_G * t).eval(); };
     auto p_G = [&](double t) { return (v0_G * t + 0.5 * a_G * t * t).eval(); }; // p0 = 0
 
