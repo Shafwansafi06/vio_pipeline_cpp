@@ -1,6 +1,16 @@
 #!/usr/bin/env python3
 """P-01 latency statistics from DOD and OpenVINS per-frame timing files.
 
+Canonical reducer for P-01/P-02 latency numbers; stdlib only, so it runs
+on-device where numpy may be absent. Expects one directory holding
+dod_<SEQ>_timing.csv and ov_<SEQ>_timing.txt, which is what p01_run.sh emits.
+For an archived run set using the older per-sequence filenames, symlink it
+into that shape first rather than adding a second reducer:
+
+    ln -s <runs>/MH_01_easy_timing.csv dod_MH_01_timing.csv
+    ln -s <runs>/ov_mh01_timing.txt    ov_MH_01_timing.txt
+
+
 DOD  *_timing.csv: timestamp,tracking_ms,estimator_ms,total_ms,observations
 OV   *_timing.txt: "# timestamp (sec),tracking,propagation,msckf update,slam
 update,slam delayed,re-tri & marg,total" (seconds)
@@ -79,6 +89,22 @@ def main():
                      % (seq, d["mean_ms"], d["p50_ms"], d["p99_ms"], d["max_ms"], d["n"],
                         o["mean_ms"], o["p50_ms"], o["p99_ms"], o["max_ms"], o["n"],
                         o["p50_ms"] / d["p50_ms"] if d["p50_ms"] else float("nan")))
+    # Geometric means. The p99 and jitter ratios are the point of this table:
+    # a bounded-state claim predicts the advantage grows toward the tail, and
+    # a mean-throughput number cannot show that.
+    if rows:
+        import math
+        def geo(f):
+            vs = [f(rows[s]["dod"], rows[s]["ov"]) for s in rows]
+            vs = [v for v in vs if v > 0]
+            return math.exp(sum(math.log(v) for v in vs) / len(vs)) if vs else float("nan")
+        g50 = geo(lambda d, o: o["p50_ms"] / d["p50_ms"])
+        g99 = geo(lambda d, o: o["p99_ms"] / d["p99_ms"])
+        gjit = geo(lambda d, o: (o["p99_ms"] - o["p50_ms"]) / (d["p99_ms"] - d["p50_ms"]))
+        lines.append("-" * 112)
+        lines.append("geometric mean DOD advantage:  p50 %.2fx   p99 %.2fx   jitter(p99-p50) %.2fx"
+                     % (g50, g99, gjit))
+
     text = "\n".join(lines)
     sys.stdout.write(text + "\n")
     with open(os.path.join(directory, "latency_table.txt"), "w") as f:

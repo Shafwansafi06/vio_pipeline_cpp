@@ -126,9 +126,19 @@ should say so plainly. Whether the ceiling can be lowered (a smaller
 
 **Method notes.** Timing came entirely from `*_timing.csv` files that already
 existed; no new estimator runs were needed for the latency half. OpenVINS
-records seconds and DOD milliseconds — the script normalises. RSS needed fresh
-runs: `/usr/bin/time` is not installed in the container, so a small
-`getrusage(RUSAGE_CHILDREN)` wrapper stands in.
+records seconds and DOD milliseconds — the reducer normalises. RSS needed
+fresh runs: `/usr/bin/time` is not installed in the container, so
+`tools/p01/withrss.py` (wait4 + `ru_maxrss`) stands in.
+
+**One harness, not two.** This ticket briefly had two reducers — a numpy one
+under `scripts/` and the stdlib `tools/p01/` set. They were cross-checked on
+identical inputs and agree (p50 1.80x, p99 2.06x, jitter 2.35x from both;
+the percentile method differs only in the last digit, 14.78 vs 14.76 ms on
+MH_01 OpenVINS p99). `tools/p01/` is canonical and the numpy duplicate is
+deleted: it is stdlib-only so it runs on-device for P-02, and `p01_run.sh`
+drives fresh runs of both estimators rather than reusing archived output.
+Archived run sets with the older filenames get symlinked into
+`dod_<SEQ>`/`ov_<SEQ>` shape; the one-liner is in the reducer's docstring.
 
 ---
 
