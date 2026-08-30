@@ -9,6 +9,7 @@
 #include <Eigen/Dense>
 #include <iostream>
 #include <cstdio>
+#include <cmath>   // std::sqrt in the parallax whitening (was transitive via Eigen)
 #include <cmath>
 #include <algorithm>
 
@@ -378,7 +379,22 @@ void update_msckf(UpdaterMSCKFData& updater, State& state, core::Feature** featu
                                        state.options.feat_rep_msckf);
             nullspace_project_inplace(H_f, H_x, res);
         }
-        
+
+        // Parallax-limited noise. R stays sigma_pix^2 * I and the block is
+        // pre-whitened instead, because measurement_compress_inplace() below
+        // is a Givens QR that only preserves whiteness for isotropic R -- a
+        // per-feature R matrix would invalidate the compression. Dividing by
+        // sqrt(scale) is exactly equivalent and, when the model is off,
+        // scale == 1.0 and the division is exact.
+        {
+            const double scale = core::parallax_noise_scale(
+                *feat, clones_cam, updater.options.parallax_noise_lambda,
+                updater.options.parallax_noise_max);
+            const double w = std::sqrt(scale);
+            H_x /= w;
+            res /= w;
+        }
+
         if (H_x.rows() == 0 || res.size() == 0) {
             feat->to_delete = true;
             continue;
@@ -548,6 +564,18 @@ void delayed_init_slam(UpdaterSLAMData& updater, State& state, core::Feature** f
         if (!get_feature_jacobian_slam(state, candidate, *feat, cam_models, H_f, H_x, res, Hx_order, num_Hx)) continue;
         if (res.size() == 0) continue;
 
+        // Same parallax-limited noise as the MSCKF path. Here it matters most:
+        // initialize() derives the NEW landmark's covariance from R, so a
+        // feature triangulated at a large depth-to-parallax ratio enters the
+        // state less confident instead of anchoring the filter to a guess.
+        {
+            const double w = std::sqrt(core::parallax_noise_scale(
+                *feat, clones_cam, updater.options_slam.parallax_noise_lambda,
+                updater.options_slam.parallax_noise_max));
+            H_x /= w;
+            H_f /= w;
+            res /= w;
+        }
         const Eigen::MatrixXd R = updater.options_slam.sigma_pix_sq * Eigen::MatrixXd::Identity(res.size(), res.size());
         if (initialize(state, &candidate, Hx_order, num_Hx, H_x, H_f, R, res, updater.options_slam.chi2_multipler)) {
             state.num_slam_features++;
@@ -561,6 +589,17 @@ void update_slam(UpdaterSLAMData& updater, State& state, core::Feature** feature
 
     double clonetimes[20];
     for (int c = 0; c < state.num_clones; ++c) clonetimes[c] = state.clones_IMU[c].timestamp;
+    // Only read by parallax_noise_scale(), which returns 1.0 before touching
+    // it when the model is off. Building it is therefore pure cost on every
+    // EuRoC/KAIST update (lambda = 0 there): ~4 KB of pose writes per call,
+    // up to 2x20 ClonePose. Declared without an initialiser rather than
+    // value-initialised -- `ClonesCamera{}` would zero the same 4 KB it is
+    // trying to avoid writing. The NSDMI leaves num_clones = 0, which is what
+    // find_clone_pose reads, so the unused object is still well-defined.
+    core::ClonesCamera clones_cam;
+    if (updater.options_slam.parallax_noise_lambda > 0.0) {
+        clones_cam = build_clones_camera(state);
+    }
 
     // Reused across frames -- see the MSCKF updater for the same fix. DHAT
     // measured this one call site churning 1.68 GB (351 blocks of 4.8 MB) over
@@ -637,6 +676,17 @@ void update_slam(UpdaterSLAMData& updater, State& state, core::Feature** feature
         if (res.size() == 0 || num_Hx == 0) {
             landmark->update_fail_count++;
             continue;
+        }
+
+        // Same parallax-limited noise as the MSCKF path; whitened rather than
+        // applied as R for the identical reason.
+        {
+            const double w = std::sqrt(core::parallax_noise_scale(
+                feat_slam, clones_cam, updater.options_slam.parallax_noise_lambda,
+                updater.options_slam.parallax_noise_max));
+            H_x /= w;
+            H_f /= w;
+            res /= w;
         }
 
         // Full order = state vars + this landmark, H_xf = [H_x | H_f].

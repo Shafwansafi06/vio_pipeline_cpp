@@ -41,6 +41,10 @@ struct VioManagerOptions {
     // chi2 gate, catastrophic silent divergence. Left off by default; the
     // MSCKF-only path is the verified 0.685 m ATE baseline on circle.bag.
     bool enable_slam = false;
+    // NOTE: update_msckf_schur() does NOT apply the parallax noise whitening
+    // that update_msckf() does. Flipping this to true silently disables
+    // UpdaterOptions::parallax_noise_lambda in the MSCKF path. Nothing sets it
+    // today; wire the whitening into updater_schur.cpp before anything does.
     bool use_schur_msckf = false;
     // Seconds after the first processed image before any SLAM landmark may be
     // created. Official's dt_slam_delay (1.0 on EuRoC); guards against

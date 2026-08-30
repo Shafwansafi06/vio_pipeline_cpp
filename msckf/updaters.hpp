@@ -26,6 +26,13 @@ struct UpdaterOptions {
     int min_update_rows = 1;
     double max_innovation_condition = 1e12;
     int min_features_for_update = 1;
+
+    // Parallax-limited measurement noise (core::parallax_noise_scale). 0.0 is
+    // off and is bit-identical to no model at all; the mid-altitude runner is
+    // the only configuration that sets it. Not tuned on EuRoC -- EuRoC never
+    // reaches the depth-to-parallax ratios this exists for.
+    double parallax_noise_lambda = 0.0;
+    double parallax_noise_max = 100.0;   // hard cap on the variance multiplier
 };
 
 struct UpdaterMSCKFData {
