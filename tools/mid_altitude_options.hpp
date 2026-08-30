@@ -171,7 +171,20 @@ inline msckf::VioManagerOptions make_mid_altitude_options() {
     // confirms the bottleneck is depth/baseline geometry, not triangulation
     // gate strictness. Reverted.
     options.feat_init_opt.max_cond_number = 10000.0;
+    // T-004 ranked the triangulation reject counters on 80_4 and found
+    // reject_cond=64947 against reject_maxdist=13744 -- conditioning is the
+    // dominant gate at altitude by 4.7x, and this constant had never been
+    // swept upward. Direction is not obvious: 3000 (stricter) was measured
+    // worse on 40_4, which says nothing about what looser does at 80 m.
+    if (const char* env = std::getenv("VIO_MAX_COND")) {
+        const double c = std::atof(env);
+        if (c > 0.0) options.feat_init_opt.max_cond_number = c;
+    }
     options.feat_init_opt.min_dist = 0.10;
+    if (const char* env = std::getenv("VIO_MIN_DIST")) {
+        const double d = std::atof(env);
+        if (d > 0.0) options.feat_init_opt.min_dist = d;
+    }
     // DERIVED, not tuned. EuRoC's 75.0 was set for <5m indoor scenes and is
     // the single constant that does not survive this dataset's altitude
     // range. A downward camera at altitude h sees its frame corner at slant
