@@ -19,7 +19,7 @@ this system):
    code. Do not retry it later from memory.
 4. Nothing lands without the accuracy gate (T-003) green.
 
-Last updated: 2026-08-30 (T-001..T-005, T-013 closed).
+Last updated: 2026-08-30 (T-001..T-006, T-013 closed).
 
 ---
 
@@ -39,7 +39,7 @@ Last updated: 2026-08-30 (T-001..T-005, T-013 closed).
 | T-005 | Triangulation conditioning + init at altitude | **done — no constant fixes it** | — |
 | T-007 | FGI into tools/sweep.sh | todo | T-004 |
 | T-008 | Altitude-stratified baseline, lambda=0, 12 bags | todo | T-004, T-007 |
-| T-006 | Sweep VIO_PARALLAX_LAMBDA over the envelope | todo | T-002, T-008 |
+| T-006 | Sweep VIO_PARALLAX_LAMBDA over the envelope | **done — model refuted** | — |
 
 ## Later
 
@@ -338,16 +338,64 @@ in-branch candidate, and its prediction from T-004 is still standing.
 
 ## T-006 — Sweep VIO_PARALLAX_LAMBDA
 
-**Status:** todo. Blocked on T-002 and T-008.
+**Status:** done, 2026-08-30. **The model is refuted.** Everything it appeared
+to achieve is reproduced exactly by a flat measurement-noise inflation with the
+model switched off, and the flat version is strictly better at every altitude.
 
-`VIO_PARALLAX_LAMBDA` in 0/40/60/80/100 across the 40/60/80/100 m bags. The
-model is `sigma_eff^2 = sigma_pix^2 * (1 + (lambda*Z/B)^2)`, capped at
-`parallax_noise_max`.
+**The T-004 prediction was right in outcome and wrong in mechanism.** It said
+lambda > 0 should let 60_4 survive where max_dist=200 alone aborted. It does —
+1367.7 (abort) becomes 48.25. But lambda is not what did it.
 
-**Exit condition:** ATE vs lambda, per altitude, against the T-008 lambda=0
-baseline. **"It does not help" closes this ticket successfully** — the
-prediction under test is that the benefit grows with altitude, and a flat curve
-falsifies it. Record either way, do not tune until it wins.
+**The clamp counter, added before the sweep, is what caught it.** At every
+lambda >= 20, `pnw_clamped` is within a handful of `pnw_computed`
+(168481/168483) and `mean_scale` reads exactly 100.000. Every measurement gets
+the cap. `parallax_noise_scale` degenerates to the constant `max_scale`, which
+is algebraically `sigma_pix *= sqrt(max_scale)` — and that is why lambda 40,
+60, 80 and 100 give byte-identical output.
+
+**The control settles it.** `VIO_SIGMA_PIX=10` with the model off:
+
+| altitude | lambda sweep | flat control | 
+|---|---|---|
+| 40 | 15.419 | 15.419 |
+| 60 | 48.252 | 48.251 |
+| 80 | 32.068 | 32.067 |
+| 100 | 4461.8 (abort) | **110.271** |
+
+Identical at three altitudes and far better at 100 m. The cap-shape sweep
+agrees: `max_scale=25` gives 25.409 and `sigma_pix=5` gives 25.409, exactly as
+`sqrt(25) = 5` requires.
+
+**In its actual graded regime the model is erratic and never wins.** At
+Z/B of 20-300, any lambda >= 1 saturates any usable cap, so the graded regime
+needs lambda ~ 0.01-0.1 with the cap lifted. On 80 m: 0.005 -> 49482,
+0.01 -> 43941, 0.02 -> 49.9, 0.05 -> 174332, 0.1 -> 45.2. Non-monotonic by four
+orders of magnitude — the filter is sitting on a stability cliff and the
+weighting decides which features survive, not how much they are trusted. Best
+graded result (45.2) loses to flat sigma=15 (23.2). Applied on top of the flat
+optimum it destroys it: 25.4 -> 1256.7.
+
+**What actually fixes altitude: sigma_pix, an inherited EuRoC placeholder.**
+
+| altitude | sigma=1 (as shipped) | best flat sigma | improvement |
+|---|---|---|---|
+| 40 | **12.814** (sigma=1) | 12.814 | — |
+| 60 | 1368 (abort) | 48.25 (sigma=10) | 28x |
+| 80 | 56303 | **23.17** (sigma=15) | 2430x |
+| 100 | 94897 | **110.27** (sigma=10) | 861x |
+
+The whole envelope now runs. Drift is 1.8% of path at 40 m and 2-11% at
+60-100 m, against three orders of magnitude of divergence before. The optimal
+sigma rises with altitude (1, 10, 15, 10), which is an altitude-dependent noise
+story — just not the Z/B one this branch was built on.
+
+This is M-14 again, and the config file predicted it: every constant there is
+marked PLACEHOLDER except `sigma_pix`, which was the one that mattered.
+
+**Consequence for T-009.** "Altitude-robust stereo VIO via a parallax-scaled
+covariance model" is dead as a claim. What survives is measured and real: a
+characterisation of where MSCKF breaks at altitude, two genuine bugs, and the
+finding that the dominant lever is a pixel-noise constant nobody had questioned.
 
 ---
 

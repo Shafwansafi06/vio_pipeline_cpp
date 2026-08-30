@@ -12,7 +12,7 @@ Format:
 - **Rule** — the generalisation, if there is one. Not every mistake has one.
 - **Reaches forward to** — which open tickets this can still bite.
 
-Newest at the top within each section. Last updated: 2026-08-30 (M-21/22, T-005).
+Newest at the top within each section. Last updated: 2026-08-30 (M-23, T-006).
 
 ---
 
@@ -42,6 +42,39 @@ Newest at the top within each section. Last updated: 2026-08-30 (M-21/22, T-005)
   only a patch over it.
 - **Reaches forward to:** T-006, T-008 — both sweep configs, and any value
   near a buffer bound deserves this check.
+
+### M-23 — A model that was really a constant
+
+- **Believed:** `sigma_eff^2 = sigma_pix^2 * (1 + (lambda*Z/B)^2)` down-weights
+  measurements in proportion to their depth-to-parallax ratio. The whole branch
+  is built on it. When the sweep showed 60_4 surviving and 80 m improving 1750x,
+  that looked like confirmation of a prediction written down in advance.
+- **True:** at Z/B of 20-300, `(lambda*Z/B)^2` exceeds any usable cap for any
+  lambda >= 1, so `pnw_clamped` equalled `pnw_computed` and `mean_scale` was
+  exactly `max_scale` for every feature. The function was returning a constant.
+  Algebraically that is `sigma_pix *= sqrt(max_scale)` — a flat noise inflation
+  with no dependence on Z/B at all. The control reproduces it to three decimals
+  at 40, 60 and 80 m and beats it at 100 m. In the genuinely graded regime
+  (lambda ~ 0.01-0.1, cap lifted) the model is non-monotonic across four orders
+  of magnitude and never beats the flat version.
+- **Cost:** none beyond the sweep itself, because the clamp counter was added
+  *before* the sweep — section D of this file had flagged exactly this risk
+  ("if T-006 ever hits the clamp, the cap is doing the tuning"). Without it,
+  "parallax-scaled covariance fixes high-altitude VIO, 1750x on 80 m" is a
+  plausible, publishable, wrong claim.
+- **Rule:** **a model with a clamp needs a clamp counter before it needs a
+  sweep.** Any saturating nonlinearity can collapse to a constant, and a
+  constant that happens to help is indistinguishable from a working model
+  unless the saturation is measured.
+- **Second rule:** every parameterised model owes a *degenerate control* — the
+  simplest thing it could collapse into, run with the model off. If the model
+  cannot beat its own degenerate case, it is the degenerate case. This one
+  could not.
+- **Third rule:** a prediction confirmed in outcome is not a mechanism
+  confirmed. T-004's prediction came true exactly as written and was still
+  wrong about why.
+- **Reaches forward to:** T-009, which can no longer claim the model, and any
+  future weighting scheme in this pipeline.
 
 ### M-22 — A second tidy explanation, caught this time
 
@@ -360,9 +393,9 @@ let them rot here.
   badly-conditioned triangulations at full confidence — the exact case
   `parallax_noise_scale` was written for. Recorded as T-006's prediction so it
   can be falsified rather than confirmed after the fact.
-- `parallax_noise_max=100.0` is an unjustified cap. If T-006 ever hits the
-  clamp, the cap is doing the tuning and the result is about the cap, not the
-  model. Log clamp hits before reading that sweep.
+- ~~`parallax_noise_max=100.0` is an unjustified cap...~~ **Resolved 2026-08-30
+  (T-006): the cap was doing all of the tuning.** This entry is why the counter
+  existed before the sweep. See M-23.
 - `update_msckf_schur()` does not whiten. `use_schur_msckf` is false
   everywhere, so no live gap, but a lambda sweep run against the schur path
   would return a null result that looks like evidence. Re-check the flag before
@@ -378,3 +411,7 @@ let them rot here.
 - The collapse past 15 clones kills SLAM promotion and marginalisation for
   reasons not yet identified. Affects EuRoC configs too in principle; nothing
   sets a window that long today.
+- `sigma_pix = 1.0` was inherited from EuRoC and is the dominant constant at
+  altitude: 80 m goes from 56303 to 23.17 by changing it alone. The optimum
+  rises with altitude (1, 10, 15, 10 at 40/60/80/100 m). Unlike the other
+  placeholders in the FGI config, this one was never marked as suspect.
