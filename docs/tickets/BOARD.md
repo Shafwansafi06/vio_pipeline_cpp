@@ -33,15 +33,15 @@ Rationale and what it costs us in `docs/paper_spine.md`.
 |----|-------|--------|------|
 | P-01 | Predictability: p99, jitter, latency CDF, RSS | **done — p99 wins, RSS does not** | ~free, data on disk |
 | P-05 | Toolchain confound (already measured) | **done — paper Sec. toolchain + Table** | free, T-013 output |
-| P-02 | Close the embedded loop on Orin Nano | **blocked — device offline** | needs device back |
+| P-02 | Close the embedded loop on Orin Nano | **done — full 10x2 matrix on-device** | — |
 | P-03 | DOD-Schur vs ov_SchurVINS head-to-head | **done — row 9 dropped, withdrawal documented** | medium |
-| P-04 | Transport confound, full 10x2x2 matrix | todo | medium |
-| P-06 | Convert speed headroom into accuracy | todo | tight for 2 weeks |
-| P-07 | Artifact: docker + scripts + CSVs | todo | small |
+| P-04 | Transport confound, full 10x2x2 matrix | **done — re-measured; 15% was toolchain misattribution** | medium |
+| P-06 | Convert speed headroom into accuracy | **parked — out of budget by user decision** | tight for 2 weeks |
+| P-07 | Artifact: docker + scripts + CSVs | **done — artifact/README.md is the map** | small |
 
 Two-week ordering: P-01 and P-05 first (both nearly free and both directly
 support the thesis), then P-02 as soon as the device is reachable, then P-03.
-P-04 and P-06 only if those land.
+P-04 landed; P-06 was parked by user decision.
 
 ## Parked — altitude line
 
@@ -154,50 +154,67 @@ unaffected and still open.
 
 ## P-02 — Close the embedded loop
 
-**Status: blocked, 2026-08-30. The Orin is off the network.**
-`172.28.76.158` (alias `orin` on moonlab): 100% packet loss from both the
-laptop and moonlab, not in moonlab's ARP cache, no mDNS. That is powered-down
-or a new DHCP lease, not SSH refusing — plausible given the clock had reset by
-12 days. Nothing in steps 1-6 can proceed until it answers.
+**Status:** done, 2026-08-30 evening. **Both estimators, all ten sequences,
+on the Orin Nano, inside the same-toolchain container.** The device came
+back (same IP, fresh lease, rebooted — uptime 54 min); everything below ran
+in one session.
 
-**Done before it went away** (from `docs/orin_runbook.md` and the staging
-session): key auth laptop->Orin, clock corrected, environment recorded
-(JetPack R36.4.7, Ubuntu 22.04, 6-core A78AE, 7.4 GB, 85 GB free, no host
-ROS1). The important find is that the device already carries an
-`ov_ros1_20_04` image — Ubuntu 20.04 arm64, g++ 9.4, OpenCV 4.2 — **the same
-toolchain as the x86 container**, so architecture is the only variable against
-the P-01 numbers. Given P-05, that is worth a lot: it removes the confound
-that would otherwise make the aarch64 comparison unreadable.
+**Setup discovered, not assumed:**
+- The device's clock had been 12 days stale; fixed before anything
+  TLS-touching ran.
+- No ROS1 on the JetPack 6 host, but the pre-existing `ov_ros1_20_04` image
+  (Ubuntu 20.04 arm64, g++ 9.4, OpenCV 4.2 — same toolchain as the x86
+  container) is what all runs use, so **ISA is the only variable** vs the
+  P-01 numbers. Both estimators rebuilt from source in that image
+  (`~/p02/dod` = HEAD + VIO_SCHUR runner knob; `~/p02/openvins_ws` built
+  from the official source).
+- Captive portal MITMs docker hub from the device (cert = *.iiserb.ac.in);
+  no pulls possible. None needed.
+- **The 28 GB bag rsync had silently discarded every file**: the Orin's
+  pre-existing `~/bags` was root-owned, mkstemp failed per file, and the
+  sender still reported "29 GB, 100%, xfr#10". Verify receiver-side files,
+  never the sender's summary. After `chown`, the retry landed 10/10 bags
+  (28 GB, verified by count + size).
+- Lab-box pubkey sits in the Orin's authorized_keys and is still rejected
+  (never root-caused; laptop's key works). Transfers used SSH_ASKPASS;
+  `/tmp/ap.sh` deleted after use.
 
-**Unverified and needs re-checking when it returns.** The bag rsync hit
-`Permission denied` on a root-owned `~/bags` and was retried; `bags_rsync.log`
-shows per-file `mkstemp` failures for at least MH_01, MH_02, circle and
-infinite, `bags_rsync2.log` still fails on infinite.bag, and both
-`bags_rsync3.log` and `ov_rsync.log` are zero bytes. **Do not assume the
-retry succeeded** — first action on reconnect is `ls ~/bags/*.bag | wc -l`
-(expect 10) and a completeness check of `~/p02/open_vins_official`.
+**Results** (on-device `~/p02/out/`, archived to
+`/media/storage/moonlab/vio_parity/acv/p02/`; harness `tools/p02/p02_run.sh`
+mirrors `tools/p01/p01_run.sh`):
+- Per-frame latency: DOD p50 27.0–35.3 ms vs OpenVINS 34.1–47.4 ms
+  (1.16–1.61x); p99 45.0–63.4 vs 54.8–81.8 ms (1.08–1.43x). DOD faster on
+  10/10 at both percentiles. **The desktop tail advantage does not grow on
+  the small core** — p99-ratio < p50-ratio on 8 of 10 sequences here, the
+  opposite of x86. The paper's embedded section reports the narrowing.
+- Real-time read: OpenVINS p99 exceeds the 50 ms EuRoC budget on 10/10
+  sequences; DOD on 9/10, by 1–13 ms; DOD's median stays inside budget on
+  all ten.
+- Peak RSS: DOD flat 184–199 MB; OpenVINS 98–179 MB variable — same shape
+  as x86. The arena premium is visible and honest.
+- ATE side-check (7 seqs with bag-transport ground truth; V1 gt empty as on
+  x86): 0.1316 / 0.1928 / 0.2473 / 0.3505 / 0.3358 / 0.0835 / 0.0365 — no
+  divergence anywhere; quoted as their own column per P-05's rule.
+- Paper updated: Sec.~latency added to Results (tab:latency + fig:cdf,
+  x86), Sec.~embedded rewritten from "preliminary" to the real section
+  (tab:aarch64-latency + fig:cdf-aarch64); abstract, contributions,
+  limitations, conclusion updated; `main.tex` compiles clean. ov_SchurVINS
+  row 9 dropped per the P-03 decision.
 
-**Then, in order:** `bash ~/p02/build.sh` (10-15 min); adapt
-`tools/p01/p01_run.sh` for the device (docker run rather than exec, `/p02/`
-paths, the same `record_timing` sed); run the 10x2 matrix under
-`tools/p01/withrss.py`; reduce on-device with `tools/p01/latency_stats.py`
-(stdlib-only, which is why it is canonical); copy timing CSVs off for the
-figure; compare against the P-01 table.
+**Not done (recorded in Limitations):** on-device hyperfine wall-clock,
+thermal/frequency-governor control, DHAT on aarch64.
 
-**The number the paper actually needs:** does 2x survive on the small core.
-On a 6-core A78AE with a small cache, the layout thesis predicts the advantage
-should be *larger* than on the 7950X, and P-01 gives the x86 reference to
-measure that against — including p99 and jitter, where the advantage is
-already bigger than at the mean.
-
-**If it does not come back:** `docs/paper_spine.md` names the fallback, and it
-is RA-L rather than ICRA. That decision belongs to the device, not to us.
+**Note on the thesis prediction:** the spine doc predicted the advantage
+should be *larger* on the small core. It is smaller. Recorded as found; the
+plausible mechanism (LPDDR5 bandwidth bound → cache-locality wins shrink)
+is untested and is not claimed in the paper.
 
 ---
 
 ## P-03 — DOD-Schur vs ov_SchurVINS
 
-**Status:** blocked, 2026-08-30. **The authors' fork, as shipped, cannot
+**Status:** resolved 2026-08-30 (user decision: drop row 9; resolution
+recorded at the end of this ticket). **The authors' fork, as shipped, cannot
 complete MH_01 in this environment. The paper's ablation row 9 (1.97x/2.16x
 vs ov_SchurVINS) is currently unreproducible from the on-disk source and must
 be either reproduced or dropped.**
@@ -242,20 +259,72 @@ runner-knob patch (`/tmp/p03_runner_knob.patch` on the moonlab host).
 
 ## P-04 — Transport confound, full matrix
 
-**Status:** todo. Currently n=1 (MH_01, 0.1131 ASL vs 0.1296 bag) supporting a
-claim that this confound is "present, unremarked, in several papers". That
-claim needs 10 sequences x 2 estimators x 2 transports.
+**Status:** done, 2026-08-30. **Re-measured properly, and the headline
+changed: the ~15% "transport" effect was a misattribution; transport alone
+moves MH ATE by 0–5.2% under one toolchain. The large confound is the
+toolchain (up to 23%).**
 
-**Caution learned today:** the 0.1131 figure in that comparison is one of the
-numbers T-013 could not reproduce at any commit. Re-measure both sides before
-building an argument on it.
+**What was measured (in-container, same toolchain, DOD side):**
+- ASL transport, all eight EuRoC sequences, in-container: reproduces the
+  CLAUDE.md gate table exactly (0.1293 / 0.2080 / 0.2343 / 0.4267 / 0.3285 /
+  0.0545 / 0.0482 / 0.0550). The mystery of the paper's old 0.1131 ASL
+  figure is now fully resolved: **ASL-transport = the gate table; bag
+  transport = the paper's Table II numbers**; the "15%" compared across
+  toolchains and one unreproducible figure.
+- Bag vs ASL deltas (MH): MH_01 0.0%, MH_02 5.2%, MH_03 0.04%, MH_04 0.0%,
+  MH_05 3.9%. V1 rows omitted from the transport claim: the bag runner's V1
+  ground-truth extraction is broken (empty GT through the bag path), so a
+  V1 transport delta is confounded with GT source.
+
+**OpenVINS column reproduced from the current binary** (`p04/ovodom/`, via
+`save_total_state` passed as **ROS node parameters** — as YAML keys the
+serial node silently ignores them, which is why earlier attempts produced no
+state files; no patching needed):
+0.1180 / 0.1616 / 0.2486 / 0.4110 / 0.3195 / 0.0634 / 0.0573 / 0.0595 /
+0.0305 / 0.0284. MH + KAIST rows reproduce the paper's old column exactly;
+**V1 rows differ** (0.0634/0.0573/0.0595 vs paper's 0.1057/0.0901/0.0994) —
+the old V1 numbers are unverifiable and were replaced. Both estimators'
+V1 rows use the ASL ground-truth stream.
+
+**Consequences applied to the paper:**
+- Table ATE refreshed with verified columns: DOD 0.1293/0.1978/0.2342/
+  0.4267/0.3163/0.0751/0.0589/0.0550/0.0374/0.0261 (mean 0.156), OpenVINS
+  0.1180/0.1616/0.2486/0.4110/0.3195/0.0634/0.0573/0.0595/0.0305/0.0284
+  (mean 0.158). DOD better on 4/10, geometric-mean ratio 1.06. The old
+  DOD V1 bag numbers (0.1008/0.1004/0.0920) and old OV V1 numbers
+  (0.1057/0.0901/0.0994) are withdrawn — neither survives re-measurement.
+- Speed table refreshed: MH_01 14.034 vs 29.450 s (2.10x), MH_04 7.654 vs
+  15.666 (2.05x), circle 15.689 vs 27.628 (1.76x) — claim survives as
+  1.76–2.10x.
+- RPE table re-derived with the repo's own `scripts/error_profile.py`
+  (restored from 76acf5c): DOD drift better on 5 of 8 EuRoC, equal on 2,
+  worse on 1 (MH_02 3.5%) — stronger than the old table showed. V1 RPE
+  rows dropped by ~2x because fresh V1 estimates + ASL gt replace the
+  earlier mixed-gt numbers. Table RPE and the "better on 5, equal 2,
+  worse 1" text updated in the paper.
+- Abstract / intro bullet / conclusion / limitations updated to the
+  verified numbers.
+
+**Also fixed along the way:** `save_total_state` crash hunt — the state
+file writes stream per-frame from ROS1Visualizer; passing the flags as
+ROS parameters (`_save_total_state:=true _filepath_est:=...`) is the
+working method. The class_loader shutdown abort is benign and universal.
+
+**Known limitation:** the paper's RPE table is now fresh, but the
+init-timing sub-claims inside the RPE narrative (init at 1.3 s vs 3.1 s)
+date from the earlier session (76acf5c) and were not re-measured today;
+the fresh thirds data (MH_02 DOD 1st-third 0.2019 vs OV 0.1550) supports
+the same transient story.
 
 ---
 
 ## P-06 — Convert speed headroom into accuracy
 
-**Status:** todo, tight. The strongest reframing available ("same cost, better
-accuracy" beats "faster, same accuracy") and the least likely to fit two weeks.
+**Status:** parked, 2026-08-30 (user decision, with the board's own
+concur). The two warnings in the original ticket stand: the 40-feature cap
+already cost accuracy on 6 of 8 sequences, and every constant swept in the
+altitude work either transferred badly or was a different constant in
+disguise. Revisit only with a full sweep budget, one lever, gate-governed.
 
 **Two warnings from this session.** Capping features at OpenVINS's 40 already
 lost accuracy on 6 of 8 sequences, and every constant swept today either

@@ -35,7 +35,7 @@ profiling), and the feature database separates its search index from its
 payload storage so that inserting or removing a track does not move
 2.4 kB of unrelated feature data. The package builds under CMake, links only
 against a vendored Eigen for the core estimator, and optionally against
-OpenCV and ROS1 for the stereo tracker and dataset/rosbag runners; five
+OpenCV and ROS1 for the stereo tracker and dataset/rosbag runners; seven
 `ctest`-registered invariant tests and a bit-exact parity suite against
 OpenVINS form its continuous test gate.
 
