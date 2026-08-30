@@ -66,12 +66,15 @@ inline msckf::VioManagerOptions make_mid_altitude_options() {
     // rig is 0.30 m against 40-100 m of scene depth (Z/B of 130-330), so
     // triangulation depends on how far the platform moves across the clone
     // window. At 16 Hz and 4 m/s, 11 clones is ~0.69 s ~ 2.75 m; 20 clones is
-    // ~1.25 s ~ 5 m, which halves Z/B. Clamped at 20 because State::clones_IMU,
-    // ClonesCamera::poses and the clonetimes[] scratch arrays are all fixed at
-    // 20 -- a larger value overflows them.
+    // ~1.19 s ~ 4.75 m, which nearly halves Z/B. Clamped at 19, NOT 20:
+    // state_helper.cpp:430 stops inserting at `num_clones < 20`, while
+    // marginalisation fires on `num_clones > max_clone_size`. At 20 that
+    // condition is unreachable, the window never slides, and the filter
+    // starves -- measured on 40_4, which is healthy at 11 and 15 and collapses
+    // to accept=36 / meas_overflow=45428 / ATE 94149 at 20.
     if (const char* env = std::getenv("VIO_MAX_CLONES")) {
         const int n = std::atoi(env);
-        if (n >= 3) options.state_opt.max_clone_size = n < 20 ? n : 20;
+        if (n >= 3) options.state_opt.max_clone_size = n < 19 ? n : 19;
     }
     options.state_opt.max_slam_features = 50;
     options.state_opt.max_slam_in_update = 25;

@@ -35,6 +35,11 @@ struct StateOptions {
     bool do_calib_imu_g_sensitivity = false;
     ImuModel imu_model = ImuModel::KALIBR;
     
+    // MUST stay <= 19. clones_IMU below holds 20 and state_helper.cpp stops
+    // inserting at `num_clones < 20`, but marginalisation only fires on
+    // `num_clones > max_clone_size` -- so at 20 the window never slides and
+    // the filter silently starves (measured: 40_4 goes from ATE 12.81 at 15 to
+    // 94149 at 20, with meas_overflow=45428). No runtime guard rejects it.
     int max_clone_size = 11;
     int max_slam_features = 25;
     int max_slam_in_update = 1000;
