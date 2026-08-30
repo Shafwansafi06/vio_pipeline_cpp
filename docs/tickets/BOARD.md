@@ -1,0 +1,256 @@
+# Ticket board
+
+One file, one board. A ticket gets its own file (`docs/tickets/T-0NN.md`) only
+when its working log outgrows a few lines here — most will not.
+
+Status: `todo` / `doing` / `blocked` / `done` / `killed`.
+**One ticket in `doing` at a time.** That is the point of this board.
+
+Rules of engagement (from `../mistake-learning.md`, which is the other half of
+this system):
+
+1. Read `../mistake-learning.md` before starting a ticket. Every entry there
+   cost real hours; most of them are still reachable from here.
+2. A ticket states its **exit condition as a number or a diff**, never as
+   "works". If you cannot write down what result closes it, the ticket is not
+   ready to start.
+3. A hypothesis that gets measured and loses is a **result**. Record it in the
+   ticket, add it to `mistake-learning.md` if it teaches something, revert the
+   code. Do not retry it later from memory.
+4. Nothing lands without the accuracy gate (T-003) green.
+
+Last updated: 2026-08-30 (T-001 closed).
+
+---
+
+## Now
+
+| ID | Title | Status | Blocks |
+|----|-------|--------|--------|
+| T-001 | Commit the FGI harness + diagnostics | **done** 862b3b8 | — |
+| T-002 | Commit the whitening wiring (lambda=0) | todo | T-006 |
+| T-003 | Accuracy gate: 10-sequence sweep on moonlab | todo | T-001, T-002 |
+| T-004 | Does 60_4 converge with max_dist=200? | todo | T-005, T-006, T-008 |
+
+## Next
+
+| ID | Title | Status | Depends on |
+|----|-------|--------|-----------|
+| T-005 | Sweep VIO_INIT_MIN_REC_COND on 60_4 | todo | T-004 |
+| T-007 | FGI into tools/sweep.sh | todo | T-004 |
+| T-008 | Altitude-stratified baseline, lambda=0, 12 bags | todo | T-004, T-007 |
+| T-006 | Sweep VIO_PARALLAX_LAMBDA over the envelope | todo | T-002, T-008 |
+
+## Later
+
+| ID | Title | Status | Depends on |
+|----|-------|--------|-----------|
+| T-009 | Decide the ICRA claim from the data | todo | T-006 |
+| T-010 | ICRA paper draft | todo | T-009 |
+| T-011 | Refresh docs/icra2027_plan.md | todo | — |
+| T-012 | Land the JOSS author-name fix | todo | — |
+
+---
+
+## T-001 — Commit the FGI harness + diagnostics
+
+**Status:** done — `862b3b8`, 2026-08-30.
+
+**Split boundary moved during the ticket, for the better.** The plan was to put
+`parallax_noise_scale()` in T-002 with the wiring, which would have meant
+splitting three files at line granularity. It does not need splitting: a
+function with no callers cannot move a trajectory. So T-001 took the whole
+function, its unit test, and its counters, and T-002 keeps only what actually
+touches results. The split now lands on hunk boundaries — one `git apply
+--cached` of a single hunk in `updaters.cpp` — and T-002 shrank to **50 lines
+in 2 files**, which is the smallest possible thing to revert if the gate moves.
+See M-16.
+
+**Landed:**
+- `tools/mid_altitude_options.hpp`, `ros/vio_rosbag_runner_mid_altitude.cpp`,
+  `scripts/convert_fgi_groundtruth.py` — FGI harness, `max_dist` 75 -> 200
+  derived from `h/cos(41.67 deg)`, FGI-runner-only.
+- `tri_depth_hist` / `tri_depth_sum`, `epipolar_consistency_score` + `epi_*`
+  counters, the shutdown dumps in four runners.
+- `core::parallax_noise_scale()` + `tests/verify_parallax_noise.cpp`, no callers.
+- `.gitignore`: `/data/`, `paper/.agents/`, the 16 MB vendored PDF.
+
+**Write-only check (the ticket's stated risk) — passed.** Grep of every
+diagnostic symbol: the only reads are shutdown `fprintf`s in the four runners
+and the unit test. `updaters.cpp` casts the epipolar score to `(void)`. No
+branch anywhere reads one.
+
+**Verified:** `git stash push --keep-index` of the T-002 remainder to force
+worktree == index, then a full build and `ctest` **6/6 on the T-001 tree
+alone**. This is what proves the split is real rather than assumed.
+
+**Not verified:** T-003. No EuRoC/KAIST bags on this machine. Committed anyway
+on a research branch, deliberately — the alternative was leaving four days of
+measurement in a dirty tree (M-02), and nothing in this commit is reachable
+from a non-FGI runner. The gate still governs before this reaches `main`.
+
+---
+
+## T-002 — Commit the whitening wiring
+
+**Status:** todo. Code is written and in the working tree; scope is now **50
+lines across `msckf/updaters.cpp` and `msckf/updaters.hpp`** and nothing else.
+
+**Scope:** `UpdaterOptions::parallax_noise_lambda` (default 0.0) and
+`parallax_noise_max`; the three whitening blocks in `update_msckf`,
+`delayed_init_slam`, `update_slam`; the `build_clones_camera` hoist in
+`update_slam` that only `parallax_noise_scale` needs.
+
+Whitening rather than a non-isotropic R because
+`measurement_compress_inplace` is a Givens QR that only preserves whiteness
+for isotropic R. Dividing by `sqrt(scale)` is equivalent, and at lambda = 0 the
+scale is exactly 1.0, so the division is exact in IEEE-754.
+
+**Exit condition:** T-003 bit-identical. lambda is 0 on every path except the
+FGI runner, so *any* movement in the ten recorded ATEs means the no-op is not a
+no-op — a bug in the whitening, not a tuning question. Also rebuild + `ctest`
+6/6 (the build tree currently reflects the T-001 commit, not this remainder).
+
+---
+
+## T-003 — Accuracy gate
+
+**Status:** todo — **cannot run on the laptop**, no EuRoC/KAIST bags here
+(`data/` holds only FGI GNSS CSVs). Runs on moonlab.
+
+```
+DATA=$PWD/data/mav0 NAME=acv tools/sweep.sh
+```
+
+**Exit condition — bit-identical to:**
+MH_01 0.1131, MH_02 0.1744, MH_03 0.2223, MH_04 0.4580, MH_05 0.3074,
+V1_01 0.0494, V1_02 0.0551, V1_03 0.0560, circle 0.0374, infinity 0.0261.
+
+Plus `ctest` 6/6. A moved number is an accuracy change wearing a refactor
+costume; stop and explain it before landing anything.
+
+---
+
+## T-004 — Does 60_4 converge with max_dist=200?
+
+**Status:** todo. **This is the gating experiment for the entire ICRA line.**
+
+60_4.bag diverges from t=0. Two independent causes are on record:
+1. `max_dist=75.0` (EuRoC indoor constant) sits below the 80.3 m slant range a
+   nadir camera sees at 60 m altitude -> `reject_maxdist=43579`. Already
+   derived from FOV geometry and fixed to 200.0 in the runner. **Untested.**
+2. The featureless `[v,g]` solve is badly conditioned: `rec_cond 0.0034` vs
+   40_4's 6.9e-05, gravity-vs-accel 6.1 deg vs 0.94. Levers are wired but
+   unswept (that is T-005).
+
+**Exit condition:** one run of 60_4.bag with the committed runner. Record ATE,
+`reject_maxdist`, `rec_cond`, and the `tri_depth_hist` buckets. Two outcomes,
+both useful: it converges (cause 1 was the whole story, T-005 may be
+unnecessary) or it still diverges (cause 2 is real and T-005 becomes the
+critical path).
+
+**Do not start T-006 before this closes.** lambda is untestable while the
+envelope diverges for a reason unrelated to lambda.
+
+---
+
+## T-005 — Sweep VIO_INIT_MIN_REC_COND on 60_4
+
+**Status:** todo. Blocked on T-004.
+
+Knobs already wired: `VIO_INIT_MIN_REC_COND`, `VIO_INIT_WINDOW`,
+`VIO_INIT_NUM_POSE`. Measured `rec_cond` vs window on 60_4: 0.0034 (3 frames),
+0.0068 (4 s), 0.065 (6 s). EuRoC's healthy solves sit at 1.6e-4 .. 2.3e-4, so a
+threshold between the regimes should reject the bad early solves and let the
+pre-init database grow.
+
+**Exit condition:** a table of `min_rec_cond` x ATE on 60_4 and 40_4, plus
+confirmation that EuRoC stays bit-identical (default 0 = off).
+
+**Prior art, do not repeat:** `init_imu_thresh` 1.5 -> 0.5 was tested and is
+byte-identical here (the static initializer never fires on this dataset).
+Initialising earlier was tested on KAIST and was 24% *worse*.
+
+---
+
+## T-006 — Sweep VIO_PARALLAX_LAMBDA
+
+**Status:** todo. Blocked on T-002 and T-008.
+
+`VIO_PARALLAX_LAMBDA` in 0/40/60/80/100 across the 40/60/80/100 m bags. The
+model is `sigma_eff^2 = sigma_pix^2 * (1 + (lambda*Z/B)^2)`, capped at
+`parallax_noise_max`.
+
+**Exit condition:** ATE vs lambda, per altitude, against the T-008 lambda=0
+baseline. **"It does not help" closes this ticket successfully** — the
+prediction under test is that the benefit grows with altitude, and a flat curve
+falsifies it. Record either way, do not tune until it wins.
+
+---
+
+## T-007 — FGI into tools/sweep.sh
+
+**Status:** todo. Depends on T-004.
+
+Mid-altitude runner + `scripts/convert_fgi_groundtruth.py` wired into the
+standard sweep so altitude runs are one command, like EuRoC.
+
+**Exit condition:** one invocation produces ATEs for all 12 FGI bags; the ten
+EuRoC/KAIST numbers are untouched by the change.
+
+---
+
+## T-008 — Altitude-stratified baseline (lambda=0)
+
+**Status:** todo. Depends on T-004, T-007.
+
+All 12 bags (40/60/80/100 m x 2/3/4 m/s), current model, lambda=0. This is the
+number T-006 is measured against, and the figure the paper needs regardless of
+what lambda does.
+
+**Exit condition:** a committed table of 12 ATEs + divergence flags, and a
+plot of error vs altitude.
+
+---
+
+## T-009 — Decide the ICRA claim
+
+**Status:** todo. Depends on T-006.
+
+Write the claim from the data, not before it. Candidates, in the order the
+evidence would support them:
+- lambda helps and the gain scales with altitude -> "altitude-robust stereo VIO."
+- lambda is flat but the max_dist/rec_cond fixes carry the envelope -> the
+  contribution is the characterisation plus two geometric constants, which is a
+  smaller but honest paper.
+- Nothing carries 80/100 m -> report where MSCKF breaks and why. Still a paper.
+
+**Exit condition:** one paragraph, the abstract's claim, with the figure
+numbers that back each sentence named next to it.
+
+---
+
+## T-010 — ICRA paper draft
+
+**Status:** todo. Depends on T-009. Check the ICRA 2027 CFP for the real
+deadline (historically ~Sept).
+
+---
+
+## T-011 — Refresh docs/icra2027_plan.md
+
+**Status:** todo. Cheap.
+
+The plan doc (2026-08-26) says the branch is "implemented, not yet verified"
+and that the build is broken. Both are stale as of 2026-08-30: build was an OOM,
+tests pass 6/6, and a week of FGI measurement it does not mention is recorded
+in `tools/mid_altitude_options.hpp` comments. Point it at this board rather
+than duplicating the task list.
+
+---
+
+## T-012 — Land the JOSS author-name fix
+
+**Status:** todo. One character: `Vashista` -> `Vashisht` in `paper/main.tex`,
+plus the rebuilt `main.pdf`. Trivial, but it is a co-author's name on a
+submission, so it should not ride along inside an unrelated commit.
