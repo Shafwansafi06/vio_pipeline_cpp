@@ -139,11 +139,20 @@ inline msckf::VioManagerOptions make_mid_altitude_options() {
     options.noises.sigma_ab_2 = options.noises.sigma_ab * options.noises.sigma_ab;
     options.noises.sigma_w_2 = options.noises.sigma_w * options.noises.sigma_w;
     options.noises.sigma_wb_2 = options.noises.sigma_wb * options.noises.sigma_wb;
-    options.updater_opt.sigma_pix = 1.0;
-    options.updater_opt.sigma_pix_sq = 1.0;
+    // Control for the parallax sweep (T-006): a flat measurement-noise
+    // inflation, with no dependence on Z/B. If this reproduces what
+    // VIO_PARALLAX_LAMBDA achieves, the parallax model is not what is doing
+    // the work -- its clamp is, and the clamp is a constant.
+    double sigma_pix = 1.0;
+    if (const char* env = std::getenv("VIO_SIGMA_PIX")) {
+        const double v = std::atof(env);
+        if (v > 0.0) sigma_pix = v;
+    }
+    options.updater_opt.sigma_pix = sigma_pix;
+    options.updater_opt.sigma_pix_sq = sigma_pix * sigma_pix;
     options.updater_opt.chi2_multipler = 1.0;
-    options.slam_updater_opt.sigma_pix = 1.0;
-    options.slam_updater_opt.sigma_pix_sq = 1.0;
+    options.slam_updater_opt.sigma_pix = sigma_pix;
+    options.slam_updater_opt.sigma_pix_sq = sigma_pix * sigma_pix;
     options.slam_updater_opt.chi2_multipler = 1.0;
     options.aruco_updater_opt = options.slam_updater_opt;
 
