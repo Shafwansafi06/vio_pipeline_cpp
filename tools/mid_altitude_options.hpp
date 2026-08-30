@@ -187,6 +187,14 @@ inline msckf::VioManagerOptions make_mid_altitude_options() {
     // 40-100m envelope (133.9m worst case) with margin for terrain relief
     // and off-nadir attitude.
     options.feat_init_opt.max_dist = 200.0;
+    // Control knob for the derivation above, so the 75-vs-200 claim can be
+    // measured rather than argued: VIO_MAX_DIST=75 reproduces the EuRoC
+    // constant this dataset inherited and is expected to reject every ground
+    // feature above ~55 m altitude.
+    if (const char* env = std::getenv("VIO_MAX_DIST")) {
+        const double d = std::atof(env);
+        if (d > 0.0) options.feat_init_opt.max_dist = d;
+    }
     options.feat_init_opt.max_baseline = 100.0;
     options.feat_init_opt.max_runs = 5;
 
