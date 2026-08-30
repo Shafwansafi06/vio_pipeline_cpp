@@ -211,6 +211,10 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "[DINIT] seen=%ld ok=%ld skip_cap=%ld skip_meas=%ld skip_tri=%ld\n",
                  msckf::dinit_seen, msckf::dinit_ok, msckf::dinit_skip_cap, msckf::dinit_skip_meas,
                  msckf::dinit_skip_tri);
+    std::fprintf(stderr, "[PNW] computed=%ld clamped=%ld no_depth=%ld no_baseline=%ld mean_scale=%.3f max_scale=%.3f\n",
+                 core::pnw_computed, core::pnw_clamped, core::pnw_no_depth, core::pnw_no_baseline,
+                 core::pnw_computed ? core::pnw_scale_sum / (double)core::pnw_computed : 0.0,
+                 core::pnw_scale_max);
     std::fprintf(stderr, "[TRI] nmeas: ");
     for (int i = 2; i < 16; ++i)
         std::fprintf(stderr, "%d:(%ld/%ld) ", i, core::tri_accept_hist[i], core::tri_cond_hist[i]);

@@ -152,6 +152,14 @@ inline msckf::VioManagerOptions make_mid_altitude_options() {
     // to sweep it. NOT tuned -- the value is an experiment input, and per
     // CLAUDE.md rule 8.5 a constant tuned on one altitude would not transfer to
     // another anyway.
+    if (const char* env = std::getenv("VIO_PARALLAX_MAX")) {
+        const double m = std::atof(env);
+        if (m > 1.0) {
+            options.updater_opt.parallax_noise_max = m;
+            options.slam_updater_opt.parallax_noise_max = m;
+            options.aruco_updater_opt.parallax_noise_max = m;
+        }
+    }
     if (const char* env = std::getenv("VIO_PARALLAX_LAMBDA")) {
         const double lambda = std::atof(env);
         options.updater_opt.parallax_noise_lambda = lambda;

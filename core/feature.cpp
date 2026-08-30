@@ -36,6 +36,9 @@ long gn_accept = 0;
 long pnw_computed = 0;
 long pnw_no_depth = 0;
 long pnw_no_baseline = 0;
+// Clamp hits. If this is a large fraction of pnw_computed, max_scale is doing
+// the weighting and the sweep is measuring the cap rather than the model.
+long pnw_clamped = 0;
 double pnw_scale_sum = 0.0;
 double pnw_scale_max = 0.0;
 
@@ -168,7 +171,7 @@ double parallax_noise_scale(const Feature& feat, const ClonesCamera& clones,
 
     const double rho_sq = (Z * Z) / B_sq;
     double scale = 1.0 + lambda * lambda * rho_sq;
-    if (scale > max_scale) scale = max_scale;
+    if (scale > max_scale) { scale = max_scale; ++pnw_clamped; }
 
     ++pnw_computed;
     pnw_scale_sum += scale;

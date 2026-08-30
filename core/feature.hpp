@@ -99,7 +99,7 @@ struct Feature {
 // Requires feat.p_FinA to hold the current triangulation.
 double parallax_noise_scale(const Feature& feat, const ClonesCamera& clones,
                             double lambda, double max_scale);
-extern long pnw_computed, pnw_no_depth, pnw_no_baseline;
+extern long pnw_computed, pnw_no_depth, pnw_no_baseline, pnw_clamped;
 extern double pnw_scale_sum, pnw_scale_max;
 
 // Epipolar-plane bearing consistency between this feature's OLDEST and
