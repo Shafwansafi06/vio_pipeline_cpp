@@ -12,11 +12,31 @@ Format:
 - **Rule** — the generalisation, if there is one. Not every mistake has one.
 - **Reaches forward to** — which open tickets this can still bite.
 
-Newest at the top within each section. Last updated: 2026-08-30 (M-16, T-001).
+Newest at the top within each section. Last updated: 2026-08-30 (M-17, T-002).
 
 ---
 
 ## A. Process mistakes (the expensive ones)
+
+### M-17 — Announcing a pass from a test that tested nothing
+
+- **Believed:** `benchmark_full` is a synthetic, data-free run of the whole VIO
+  pipeline, so diffing its output across the change is a local bit-exactness
+  oracle. Ran it both sides, filtered timing lines, got "identical", said so.
+- **True:** it prints three lines and two of them are timings. The filter left
+  a single line — the banner. The comparison was vacuous, and it was reported
+  as a pass before anyone looked at what was being compared.
+- **Cost:** small, caught within a minute. The cost if it had not been caught
+  is the entire point: a fabricated green on the one property the commit most
+  needed evidence for.
+- **Rule:** before believing a diff is empty, look at what was in it. A
+  comparison that survives filtering with almost nothing left has not passed,
+  it has been emptied. Print the line count of what is actually being compared.
+- **Second rule:** an oracle has to be *shown* to discriminate. If the check
+  cannot fail, it cannot pass. Verify the harness detects a deliberate change
+  before trusting it to detect an accidental one.
+- **Reaches forward to:** T-003, T-004, T-006 — every remaining ticket is
+  settled by comparing outputs, and all of them can be faked this way.
 
 ### M-16 — Splitting a commit at the wrong boundary
 
@@ -202,3 +222,9 @@ let them rot here.
 - `parallax_noise_max=100.0` is an unjustified cap. If T-006 ever hits the
   clamp, the cap is doing the tuning and the result is about the cap, not the
   model. Log clamp hits before reading that sweep.
+- `update_msckf_schur()` does not whiten. `use_schur_msckf` is false
+  everywhere, so no live gap, but a lambda sweep run against the schur path
+  would return a null result that looks like evidence. Re-check the flag before
+  T-006.
+- Bit-exactness of `15b0860` rests on an argument (x / 1.0 is exact in
+  IEEE-754), not a measurement. Nothing local can test it. T-003 is the oracle.

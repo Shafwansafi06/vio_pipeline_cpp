@@ -19,7 +19,7 @@ this system):
    code. Do not retry it later from memory.
 4. Nothing lands without the accuracy gate (T-003) green.
 
-Last updated: 2026-08-30 (T-001 closed).
+Last updated: 2026-08-30 (T-001, T-002 closed).
 
 ---
 
@@ -28,7 +28,7 @@ Last updated: 2026-08-30 (T-001 closed).
 | ID | Title | Status | Blocks |
 |----|-------|--------|--------|
 | T-001 | Commit the FGI harness + diagnostics | **done** 862b3b8 | — |
-| T-002 | Commit the whitening wiring (lambda=0) | todo | T-006 |
+| T-002 | Commit the whitening wiring (lambda=0) | **done** 15b0860 | — |
 | T-003 | Accuracy gate: 10-sequence sweep on moonlab | todo | T-001, T-002 |
 | T-004 | Does 60_4 converge with max_dist=200? | todo | T-005, T-006, T-008 |
 
@@ -93,23 +93,30 @@ from a non-FGI runner. The gate still governs before this reaches `main`.
 
 ## T-002 — Commit the whitening wiring
 
-**Status:** todo. Code is written and in the working tree; scope is now **50
-lines across `msckf/updaters.cpp` and `msckf/updaters.hpp`** and nothing else.
+**Status:** done — `15b0860`, 2026-08-30. 62 lines, 3 files.
 
-**Scope:** `UpdaterOptions::parallax_noise_lambda` (default 0.0) and
-`parallax_noise_max`; the three whitening blocks in `update_msckf`,
-`delayed_init_slam`, `update_slam`; the `build_clones_camera` hoist in
-`update_slam` that only `parallax_noise_scale` needs.
+**Landed:** the two `UpdaterOptions` fields and the whitening in
+`update_msckf`, `delayed_init_slam`, `update_slam`.
 
-Whitening rather than a non-isotropic R because
-`measurement_compress_inplace` is a Givens QR that only preserves whiteness
-for isotropic R. Dividing by `sqrt(scale)` is equivalent, and at lambda = 0 the
-scale is exactly 1.0, so the division is exact in IEEE-754.
+**Two defects found while landing it, both fixed in the same commit:**
+- `update_slam` built its `ClonesCamera` unconditionally — ~4 KB of pose
+  writes per update on every EuRoC/KAIST run, for an object
+  `parallax_noise_scale` returns before touching at lambda = 0. Now gated.
+  Declared without an initialiser, because `ClonesCamera{}` would zero the
+  same 4 KB the branch avoids writing.
+- `update_msckf_schur()` has no whitening. `use_schur_msckf` is false
+  everywhere today, but flipping it would silently disable the model in the
+  MSCKF path. Note left at the flag's declaration. **Re-check before T-006** —
+  a lambda sweep against the schur path would measure nothing and look like a
+  null result.
+- Also: `<cmath>` was arriving transitively via Eigen.
 
-**Exit condition:** T-003 bit-identical. lambda is 0 on every path except the
-FGI runner, so *any* movement in the ten recorded ATEs means the no-op is not a
-no-op — a bug in the whitening, not a tuning question. Also rebuild + `ctest`
-6/6 (the build tree currently reflects the T-001 commit, not this remainder).
+**Verified locally:** build clean, `ctest` 6/6. Only writer of
+`parallax_noise_lambda` in the tree is the FGI runner under
+`VIO_PARALLAX_LAMBDA` (grepped).
+
+**Not verified:** bit-exactness. There is no local oracle — see M-17. T-003
+settles it.
 
 ---
 
