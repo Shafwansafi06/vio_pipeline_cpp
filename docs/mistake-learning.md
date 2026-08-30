@@ -12,11 +12,42 @@ Format:
 - **Rule** — the generalisation, if there is one. Not every mistake has one.
 - **Reaches forward to** — which open tickets this can still bite.
 
-Newest at the top within each section. Last updated: 2026-08-30 (M-18, T-003).
+Newest at the top within each section. Last updated: 2026-08-30 (M-19, T-013).
 
 ---
 
 ## A. Process mistakes (the expensive ones)
+
+### M-19 — A tidy explanation, accepted one check too early
+
+- **Believed:** the EuRoC baseline drift was an OpenCV version difference. Host
+  runs 4.5.4, container runs 4.2.0, the KLT frontend is OpenCV's, and the two
+  sequences that matched the recorded table exactly had been run in the
+  container. Every observation fit. I wrote it into CLAUDE.md, the board and a
+  commit message as the leading hypothesis.
+- **True:** building the ASL runner in the container returned 0.1293 for MH_01,
+  against the host's 0.1282 — a 1% difference, not the 13% the theory needed.
+  The real answer was one commit away in the project's own history: `1ec3389`
+  had re-recorded MH_01 at 0.1293 the day after the table was written. And the
+  table was worse than stale — `a7addf6`, the commit that introduced it,
+  returns 0.1496. The figure never reproduced anywhere.
+- **Cost:** an hour, and three documents briefly asserting something false.
+- **Rule:** the danger sign is a hypothesis that explains *everything*
+  available. That is usually a sign the available evidence is thin, not that
+  the theory is strong. Fitting all the data is the beginning of a test, not
+  the end of one.
+- **Second rule:** search the project's own history before theorising about the
+  environment. `git log -S` on the disputed number found the answer in seconds
+  and would have cost nothing had it come first.
+- **Third rule:** when a hypothesis reaches a written document, it carries a
+  label saying it is a hypothesis, and whoever wrote it owns going back to
+  correct it. Done here: CLAUDE.md now states the measured position.
+- **Partly right, and worth keeping:** environment really does affect the
+  result — host and container disagree by 23% on MH_02 and 8% on V1_01 for
+  identical code. That justified pinning the gate to an environment, which
+  stands. It just was not the cause of this discrepancy.
+- **Reaches forward to:** T-004 especially, where a single diverging sequence
+  will invite exactly this kind of tidy story.
 
 ### M-18 — Trusting a recorded baseline as the oracle
 
@@ -257,3 +288,5 @@ let them rot here.
 - ~~Bit-exactness of `15b0860` rests on an argument, not a measurement.~~
   **Measured 2026-08-30 (T-003): 10/10 sequences byte-identical against the
   pre-branch control tree.** The argument now has evidence behind it.
+- What configuration produced the withdrawn 0.1131 table is unknown. Closed as
+  not worth chasing (T-013); the control-tree method does not depend on it.

@@ -87,22 +87,40 @@ the sweep and compare against the recorded ATEs:
 DATA=$PWD/data/mav0 NAME=whatever tools/sweep.sh    # on the lab box
 ```
 
-Expected, all 10 sequences: MH_01 0.1131, MH_02 0.1744, MH_03 0.2223,
-MH_04 0.4580, MH_05 0.3074, V1_01 0.0494, V1_02 0.0551, V1_03 0.0560,
-circle 0.0374, infinity 0.0261. Every optimisation so far has left these
-bit-identical; one that moves them is an accuracy change wearing a performance
-costume, and needs to be argued on accuracy terms.
+**Baseline, measured 2026-08-30, in `ros_container_v2`** (OpenCV 4.2.0,
+g++ 9.4.0). EuRoC via `dod_asl_runner` on ASL directories, KAIST via
+`vio_rosbag_runner` on bags:
+
+| MH_01 | MH_02 | MH_03 | MH_04 | MH_05 | V1_01 | V1_02 | V1_03 | circle | infinity |
+|---|---|---|---|---|---|---|---|---|---|
+| 0.1293 | 0.2080 | 0.2343 | 0.4267 | 0.3285 | 0.0545 | 0.0482 | 0.0550 | 0.0374 | 0.0261 |
+
+These are byte-stable: every commit from `1ec3389` (2026-08-17) through the
+altitude branch produces bit-identical estimate CSVs on all eight EuRoC
+sequences. An optimisation that moves them is an accuracy change wearing a
+performance costume, and needs to be argued on accuracy terms.
 
 Also run `ctest` (6/6) — `verify_dynamic_init` in particular catches
 initialiser changes that the EuRoC sweep does not.
 
-**These numbers are environment-bound.** Measured 2026-08-30: KAIST circle and
-infinity reproduce exactly when run in `ros_container_v2` (OpenCV 4.2.0, g++
-9.4.0), while the eight EuRoC sequences run on the host (OpenCV 4.5.4, g++
-11.4.0) come back up to 13% away — MH_01 at 0.1282, not 0.1131 — for code that
-is byte-identical to the recorded baseline's. The KLT frontend is OpenCV's, so
-the library version is part of the result. Run the gate in the container, and
-see `docs/tickets/BOARD.md` T-013.
+**The environment is part of the result — run the gate in the container.**
+The KLT frontend is OpenCV's, and the host (OpenCV 4.5.4, g++ 11.4.0) does not
+agree with the container on every sequence. Same code, same data, same day:
+
+| | MH_01 | MH_02 | MH_03 | MH_04 | MH_05 | V1_01 | V1_02 | V1_03 |
+|---|---|---|---|---|---|---|---|---|
+| container | 0.1293 | 0.2080 | 0.2343 | 0.4267 | 0.3285 | 0.0545 | 0.0482 | 0.0550 |
+| host | 0.1282 | 0.1595 | 0.2234 | 0.4416 | 0.3115 | 0.0499 | 0.0553 | 0.0564 |
+
+Mostly within a percent, but MH_02 differs by 23% and V1_01 by 8%. Quoting an
+ATE without naming the environment is quoting a number that cannot be checked.
+
+**The old table (MH_01 0.1131, MH_02 0.1744, ...) was never reproducible.** Not
+on the host, not in the container, and not at `a7addf6` — the commit that
+recorded it, which returns 0.1496 for MH_01 on this data. Whatever produced
+those figures was a configuration that no longer exists and was never written
+down. They have been replaced above rather than chased. See
+`docs/tickets/BOARD.md` T-013 and M-18.
 
 **Prefer a control tree to the recorded table.** To answer "did my change move
 anything", build the unchanged commit alongside it in the same environment and

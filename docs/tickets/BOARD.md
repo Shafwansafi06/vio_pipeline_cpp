@@ -19,7 +19,7 @@ this system):
    code. Do not retry it later from memory.
 4. Nothing lands without the accuracy gate (T-003) green.
 
-Last updated: 2026-08-30 (T-001, T-002, T-003 closed).
+Last updated: 2026-08-30 (T-001, T-002, T-003, T-013 closed).
 
 ---
 
@@ -152,46 +152,48 @@ outputs in `acv/runs/`; container copies at `/workspace/acv/`.
 
 ---
 
-## T-013 — The recorded gate table only reproduces in the container
+## T-013 — Why the recorded gate table does not reproduce
 
-**Status:** todo. Raised by T-003. Does not block T-004.
+**Status:** done, 2026-08-30. **My hypothesis was wrong, and the answer is
+worse than it: the old table never reproduced at all.**
 
-KAIST reproduces the recorded numbers **exactly** — circle 0.0374, infinity
-0.0261, to four decimals, run in `ros_container_v2`. The eight EuRoC sequences,
-run on the host, do not:
+**The exit condition was "build the ASL runner in the container and run MH_01;
+0.1131 confirms the OpenCV hypothesis."** It returned **0.1293** — within 1% of
+the host's 0.1282. The environment was not the explanation.
 
-| seq | recorded | host, 2026-08-30 | delta |
-|---|---|---|---|
-| MH_01 | 0.1131 | 0.1282 | +13.4% |
-| MH_02 | 0.1744 | 0.1595 | -8.5% |
-| MH_03 | 0.2223 | 0.2234 | +0.5% |
-| MH_04 | 0.4580 | 0.4416 | -3.6% |
-| MH_05 | 0.3074 | 0.3115 | +1.3% |
-| V1_01 | 0.0494 | 0.0499 | +1.0% |
-| V1_02 | 0.0551 | 0.0553 | +0.4% |
-| V1_03 | 0.0560 | 0.0564 | +0.7% |
+**What is true instead:**
+1. `1ec3389` (2026-08-17) re-evaluated all ten sequences and recorded MH_01 at
+   0.1293 — exactly today's container number. The CLAUDE.md table was written
+   2026-08-16 in `a7addf6` and superseded the next day, never updated.
+2. Built `a7addf6` itself and ran it: **0.1496**. So 0.1131 did not come from
+   that commit either. It is not stale-but-once-true; it is unreproducible at
+   every commit tested, on both environments, on both the official ASL zip and
+   the bag conversion.
+3. Built `1ec3389` and compared to HEAD across all eight EuRoC sequences:
+   **byte-identical, 8/8**. Nothing between 2026-08-17 and this branch — the
+   silent-drop fixes, the aarch64 gravity fix, the JOSS pass, the parallax
+   work — has moved a EuRoC trajectory by one bit.
 
-**Not caused by this branch.** The control tree `b6e9aa2` produces byte-identical
-output to head on all eight, and the lab's own binary from 2026-08-26 gives
-0.1328 on MH_01 — also not 0.1131. The deltas go in both directions, so this is
-not a regression; it is a different environment.
+**Environment does matter, just not enough to explain 0.1131.** Host vs
+container on identical code and data agree within ~1% on six sequences but
+differ by 23% on MH_02 and 8% on V1_01. The KLT frontend is OpenCV's
+(4.5.4 host, 4.2.0 container). An ATE quoted without its environment cannot be
+checked.
 
-**Leading hypothesis, and it fits every observation:** the recorded EuRoC table
-was produced in the container. Host is OpenCV 4.5.4 / g++ 11.4.0; container is
-OpenCV 4.2.0 / g++ 9.4.0. The KLT frontend is OpenCV's, so a different OpenCV
-gives different tracks and therefore a different trajectory — and the two
-sequences that *were* run in the container match to four decimals.
+**Delivered:** CLAUDE.md's gate now carries a measured, environment-pinned
+table (container, 2026-08-30) plus the host/container comparison, and states
+that the old figures were withdrawn rather than chased.
 
-**Ruled out on the way:**
-- Data provenance. `$R/data/mav0` is a bag->ASL conversion (`.pgm`, truncated
-  timestamps) rather than the official zip. Extracted the official MH_01 ASL and
-  ran it: **bit-identical output** to the converted copy. The conversion is
-  faithful and is not the cause.
+| | MH_01 | MH_02 | MH_03 | MH_04 | MH_05 | V1_01 | V1_02 | V1_03 | circle | infinity |
+|---|---|---|---|---|---|---|---|---|---|---|
+| new baseline | 0.1293 | 0.2080 | 0.2343 | 0.4267 | 0.3285 | 0.0545 | 0.0482 | 0.0550 | 0.0374 | 0.0261 |
+| withdrawn | 0.1131 | 0.1744 | 0.2223 | 0.4580 | 0.3074 | 0.0494 | 0.0551 | 0.0560 | 0.0374 | 0.0261 |
 
-**Exit condition:** build `dod_asl_runner` inside `ros_container_v2` and run
-MH_01. If it returns 0.1131, the hypothesis is confirmed; pin the gate to the
-container in CLAUDE.md and note that host numbers are a separate baseline. If it
-does not, something else moved and this becomes a real investigation.
+KAIST was correct all along and is unchanged.
+
+**Left open deliberately:** what configuration produced 0.1131 is unknown and
+is not worth further archaeology. The control-tree method (T-003) does not
+depend on the answer.
 
 ---
 
