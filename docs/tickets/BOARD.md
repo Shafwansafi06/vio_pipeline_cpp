@@ -31,8 +31,8 @@ Rationale and what it costs us in `docs/paper_spine.md`.
 
 | ID | Title | Status | Cost |
 |----|-------|--------|------|
-| P-01 | Predictability: p99, jitter, latency CDF, RSS | todo | ~free, data on disk |
-| P-05 | Toolchain confound (already measured) | todo | free, T-013 output |
+| P-01 | Predictability: p99, jitter, latency CDF, RSS | **done — p99 wins, RSS does not** | ~free, data on disk |
+| P-05 | Toolchain confound (already measured) | **done — paper Sec. toolchain + Table** | free, T-013 output |
 | P-02 | Close the embedded loop on Orin Nano | todo | **gating; needs device** |
 | P-03 | DOD-Schur vs ov_SchurVINS head-to-head | todo | medium |
 | P-04 | Transport confound, full 10x2x2 matrix | todo | medium |
@@ -74,50 +74,71 @@ P-04 and P-06 only if those land.
 
 ## P-01 — Predictability: p99, jitter, latency CDF, RSS
 
-**Status:** todo. **Nearly free — the data already exists.**
+**Status:** done, 2026-08-30. `scripts/predictability.py`,
+`docs/results/predictability/`, `paper/figs/latency_cdf.png`.
 
-Every run this pipeline has ever done writes `*_timing.csv` with
-`timestamp,tracking_ms,estimator_ms,total_ms,observations`, ~5k rows per
-sequence. p99 frame latency, jitter (p99-p50), and a full latency CDF are a
-pandas script away, for DOD and for OpenVINS, on every sequence already run.
-No new experiments.
+**The headline: the tail advantage is larger than the mean advantage.**
+Geometric means across all ten sequences:
 
-**Why this is the highest-value cheap ticket.** The paper's thesis is bounded,
-predictable per-frame state, and it currently reports only mean throughput —
-the claim's own metric is missing. Mean throughput is also the metric a
-reviewer trusts least, because it hides exactly the tail a real-time system
-cares about.
+| statistic | DOD advantage |
+|---|---|
+| p50 latency | 1.80x |
+| **p99 latency** | **2.06x** |
+| jitter (p99 - p50) | 2.35x |
 
-**Missing piece:** max RSS. Needs `/usr/bin/time -v` around each run, or
-`getrusage` at shutdown next to the existing counters. One line, then re-run.
+Per-frame latency, milliseconds:
 
-**Exit condition:** a table of p50/p99/max frame latency and max RSS for both
-estimators on all ten sequences, plus one CDF figure. If DOD's p99 advantage
-exceeds its mean advantage, that is the paper's strongest single number and it
-belongs in the abstract.
+| seq | DOD p50 | DOD p99 | DOD max | OV p50 | OV p99 | OV max |
+|---|---|---|---|---|---|---|
+| MH_01 | 3.40 | 6.20 | 11.32 | 6.66 | 14.76 | 36.96 |
+| MH_02 | 3.55 | 6.91 | 8.37 | 6.78 | 14.55 | 21.52 |
+| MH_03 | 3.94 | 7.31 | 11.59 | 6.91 | 15.41 | 21.49 |
+| MH_04 | 3.58 | 7.29 | 8.70 | 6.52 | 14.66 | 22.69 |
+| MH_05 | 3.70 | 7.05 | 27.19 | 6.58 | 15.35 | 24.36 |
+| V1_01 | 4.36 | 7.27 | 19.16 | 7.39 | 16.64 | 33.32 |
+| V1_02 | 4.29 | 7.87 | 15.01 | 7.22 | 15.54 | 32.04 |
+| V1_03 | 3.93 | 7.82 | 17.59 | 6.48 | 14.00 | 20.19 |
+| circle | 3.43 | 6.03 | 8.79 | 6.45 | 11.10 | 19.35 |
+| infinity | 3.71 | 6.02 | 7.92 | 6.98 | 11.82 | 14.31 |
+
+This belongs in the abstract. A claim of bounded per-frame state predicts
+exactly this shape — the advantage should grow toward the tail, and it does,
+1.80x to 2.06x to 2.35x. Mean throughput alone could not have shown it.
+
+**Max RSS: DOD is worse in absolute terms and much better in variation.**
+
+| | min | max | spread | stdev |
+|---|---|---|---|---|
+| DOD | 191.1 MB | 204.0 MB | **6.8%** | 3.38 MB |
+| OpenVINS | 107.5 MB | 154.8 MB | 44.0% | 16.35 MB |
+
+DOD costs about 1.4x the peak memory and holds it nearly flat across ten
+sequences; OpenVINS is smaller and tracks its workload. This is the
+preallocation showing up honestly: `FEATURE_DB_CAPACITY = 2048` and the
+fixed-size measurement arrays are a ceiling paid up front, not a footprint that
+grows.
+
+**Report it as a trade, not a win.** For a fixed-RAM embedded target a flat
+200 MB can be preferable to a variable 110-155 MB, because the system is sized
+for the worst case regardless — but the absolute number is higher and the paper
+should say so plainly. Whether the ceiling can be lowered (a smaller
+`FEATURE_DB_CAPACITY`) without touching accuracy is a separate, cheap question.
+
+**Method notes.** Timing came entirely from `*_timing.csv` files that already
+existed; no new estimator runs were needed for the latency half. OpenVINS
+records seconds and DOD milliseconds — the script normalises. RSS needed fresh
+runs: `/usr/bin/time` is not installed in the container, so a small
+`getrusage(RUSAGE_CHILDREN)` wrapper stands in.
 
 ---
 
 ## P-05 — The toolchain confound
 
-**Status:** todo. **Already measured, costs nothing to write up.**
-
-T-013 established it by accident: identical code, identical data, same day,
-differing only in OpenCV 4.2.0 / g++ 9.4.0 versus 4.5.4 / g++ 11.4.0.
-
-| | MH_01 | MH_02 | MH_03 | MH_04 | MH_05 | V1_01 | V1_02 | V1_03 |
-|---|---|---|---|---|---|---|---|---|
-| container | 0.1293 | 0.2080 | 0.2343 | 0.4267 | 0.3285 | 0.0545 | 0.0482 | 0.0550 |
-| host | 0.1282 | 0.1595 | 0.2234 | 0.4416 | 0.3115 | 0.0499 | 0.0553 | 0.0564 |
-
-Mostly within 1%, but **23% on MH_02** and 8% on V1_01. The KLT frontend is
-OpenCV's, so the library version is part of the reported result.
-
-**Why it matters more than it looks.** It is a second confound of the same
-species as the transport confound, it lands on the same sequences reviewers
-check, and it is measured rather than asserted. It also raises the bar on the
-transport claim: an ATE quoted without transport *and* toolchain cannot be
-reproduced. Pairs with P-04.
+**Status:** done, 2026-08-30. Written into `paper/main.tex` as a methods
+subsection (\texttt{sec:toolchain}) with the T-013 table (container vs host,
+$\Delta$ relative to container). Numbers unchanged from T-013; nothing
+re-measured. P-04's caution about the unreproducible 0.1131 ASL figure is
+unaffected and still open.
 
 ---
 
