@@ -33,7 +33,7 @@ Rationale and what it costs us in `docs/paper_spine.md`.
 |----|-------|--------|------|
 | P-01 | Predictability: p99, jitter, latency CDF, RSS | **done — p99 wins, RSS does not** | ~free, data on disk |
 | P-05 | Toolchain confound (already measured) | **done — paper Sec. toolchain + Table** | free, T-013 output |
-| P-02 | Close the embedded loop on Orin Nano | todo | **gating; needs device** |
+| P-02 | Close the embedded loop on Orin Nano | **blocked — device offline** | needs device back |
 | P-03 | DOD-Schur vs ov_SchurVINS head-to-head | **done — row 9 dropped, withdrawal documented** | medium |
 | P-04 | Transport confound, full 10x2x2 matrix | todo | medium |
 | P-06 | Convert speed headroom into accuracy | todo | tight for 2 weeks |
@@ -154,21 +154,44 @@ unaffected and still open.
 
 ## P-02 — Close the embedded loop
 
-**Status:** todo — **runbook written** (`docs/orin_runbook.md`); waiting on
-device access. Everything else in the two-week plan proceeds without it.
-On connect: record the environment block first, decide the ROS1 route
-(docker arm64 noetic preferred), stage bags, mirror the P-01 harness.
+**Status: blocked, 2026-08-30. The Orin is off the network.**
+`172.28.76.158` (alias `orin` on moonlab): 100% packet loss from both the
+laptop and moonlab, not in moonlab's ARP cache, no mDNS. That is powered-down
+or a new DHCP lease, not SSH refusing — plausible given the clock had reset by
+12 days. Nothing in steps 1-6 can proceed until it answers.
 
-Current embedded section is one sequence, ASL transport, no baseline, no
-latency or memory numbers, and says so honestly. That honesty reads as a gap
-because the embedded platform is where the layout thesis is strongest: 2x on a
-6-core A78AE with a small cache means more than 2x on a 7950X.
+**Done before it went away** (from `docs/orin_runbook.md` and the staging
+session): key auth laptop->Orin, clock corrected, environment recorded
+(JetPack R36.4.7, Ubuntu 22.04, 6-core A78AE, 7.4 GB, 85 GB free, no host
+ROS1). The important find is that the device already carries an
+`ov_ros1_20_04` image — Ubuntu 20.04 arm64, g++ 9.4, OpenCV 4.2 — **the same
+toolchain as the x86 container**, so architecture is the only variable against
+the P-01 numbers. Given P-05, that is worth a lot: it removes the confound
+that would otherwise make the aarch64 comparison unreadable.
 
-**Needs:** ROS 1 on the device (the current blocker forcing ASL transport),
-OpenVINS built on-device, full EuRoC + KAIST, and P-01's latency/RSS numbers on
-both platforms so the comparison is like-for-like.
+**Unverified and needs re-checking when it returns.** The bag rsync hit
+`Permission denied` on a root-owned `~/bags` and was retried; `bags_rsync.log`
+shows per-file `mkstemp` failures for at least MH_01, MH_02, circle and
+infinite, `bags_rsync2.log` still fails on infinite.bag, and both
+`bags_rsync3.log` and `ov_rsync.log` are zero bytes. **Do not assume the
+retry succeeded** — first action on reconnect is `ls ~/bags/*.bag | wc -l`
+(expect 10) and a completeness check of `~/p02/open_vins_official`.
 
-**Exit condition:** the same table as x86, on aarch64, with OpenVINS beside it.
+**Then, in order:** `bash ~/p02/build.sh` (10-15 min); adapt
+`tools/p01/p01_run.sh` for the device (docker run rather than exec, `/p02/`
+paths, the same `record_timing` sed); run the 10x2 matrix under
+`tools/p01/withrss.py`; reduce on-device with `tools/p01/latency_stats.py`
+(stdlib-only, which is why it is canonical); copy timing CSVs off for the
+figure; compare against the P-01 table.
+
+**The number the paper actually needs:** does 2x survive on the small core.
+On a 6-core A78AE with a small cache, the layout thesis predicts the advantage
+should be *larger* than on the 7950X, and P-01 gives the x86 reference to
+measure that against — including p99 and jitter, where the advantage is
+already bigger than at the mean.
+
+**If it does not come back:** `docs/paper_spine.md` names the fallback, and it
+is RA-L rather than ICRA. That decision belongs to the device, not to us.
 
 ---
 
