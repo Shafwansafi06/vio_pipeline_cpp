@@ -34,7 +34,7 @@ Rationale and what it costs us in `docs/paper_spine.md`.
 | P-01 | Predictability: p99, jitter, latency CDF, RSS | **done — p99 wins, RSS does not** | ~free, data on disk |
 | P-05 | Toolchain confound (already measured) | **done — paper Sec. toolchain + Table** | free, T-013 output |
 | P-02 | Close the embedded loop on Orin Nano | todo | **gating; needs device** |
-| P-03 | DOD-Schur vs ov_SchurVINS head-to-head | todo | medium |
+| P-03 | DOD-Schur vs ov_SchurVINS head-to-head | **done — row 9 dropped, withdrawal documented** | medium |
 | P-04 | Transport confound, full 10x2x2 matrix | todo | medium |
 | P-06 | Convert speed headroom into accuracy | todo | tight for 2 weeks |
 | P-07 | Artifact: docker + scripts + CSVs | todo | small |
@@ -144,8 +144,10 @@ unaffected and still open.
 
 ## P-02 — Close the embedded loop
 
-**Status:** todo. **Gating dependency: physical access to the Orin Nano.**
-Everything else in the two-week plan can proceed without it; this cannot.
+**Status:** todo — **runbook written** (`docs/orin_runbook.md`); waiting on
+device access. Everything else in the two-week plan proceeds without it.
+On connect: record the environment block first, decide the ROS1 route
+(docker arm64 noetic preferred), stage bags, mirror the P-01 harness.
 
 Current embedded section is one sequence, ASL transport, no baseline, no
 latency or memory numbers, and says so honestly. That honesty reads as a gap
@@ -162,13 +164,46 @@ both platforms so the comparison is like-for-like.
 
 ## P-03 — DOD-Schur vs ov_SchurVINS
 
-**Status:** todo. `msckf/updater_schur.cpp` is built and unused;
-`/workspace/ov_schurvins_src` is on moonlab. A second baseline that nobody else
-can produce, because it requires both implementations of the same idea.
+**Status:** blocked, 2026-08-30. **The authors' fork, as shipped, cannot
+complete MH_01 in this environment. The paper's ablation row 9 (1.97x/2.16x
+vs ov_SchurVINS) is currently unreproducible from the on-disk source and must
+be either reproduced or dropped.**
 
-**Note from T-002:** `update_msckf_schur()` does not apply the parallax
-whitening. Irrelevant now that the model is refuted, but confirm no other
-divergence before quoting numbers from that path.
+**What works:**
+- `VIO_SCHUR` env knob added to both bag runners (same pattern as
+  `dod_asl_runner.cpp`), default off. **No-op verified**: p03 tree, knob
+  unset, MH_01 bag_start 0 — estimate CSV **byte-identical** to the p01 run.
+- DOD-Schur path runs the full sequence: MH_01 bag_start 40, 2897 frames,
+  exit 0 (`/workspace/acv/p03/out/mh01_dodschur_*`).
+
+**What does not:** `ov_SchurVINS` rebuilt from the pristine on-disk source
+(`/workspace/ov_schurvins_src`, uniform extraction mtimes — no local edits)
+in `/workspace/schur_ws`, both Release and Debug:
+- Serial mode: deterministic abort at frame **896** of MH_01, inside their
+  Schur stacking ("Stacking Extra W for Landmark 4699, state 21") — same
+  landmark, same frame count, both build types. At bag_start 40 it diverges
+  first (p_IinG ~ 19 km, "No features to update after triangulation" x1386).
+- Subscribe mode + rosbag play: aborts on **negative covariance diagonals**
+  in their own `StateHelper::SV_EKFUpdate()` — the exact M-13 failure mode
+  (dense-form asymmetry) that DOD's rank-k update was written to fix.
+- Their own shipped `config/euroc_mav/estimator_config.yaml` enables camera
+  pose calibration their own code aborts on ("not implemented yet"). A
+  working configuration requires calib_cam_extrinsics/intrinsics/timeoffset
+  false and use_fej false (now in `/workspace/ovrun/schur_euroc/`).
+
+**Provenance gap, again (M-18/T-013):** the paper's row-9 numbers came from a
+build that no longer exists, with a protocol (bag_start 40 + static init)
+that does not survive against the current source in either init mode. No
+launch script, working config, or estimate output from that run survives.
+Treat row 9 like the withdrawn 0.1131 table: not citable until reproduced.
+
+**Decision (user, 2026-08-30): drop row 9.** Done — related-work sentence,
+wall-clock paragraph, ablation row and limitations all updated in
+`paper/main.tex`; limitations now states the withdrawal and why. The fork's
+crash evidence stays recorded here if anyone ever wants to root-cause it.
+
+Artifacts: `/workspace/acv/p03/` (container); p03 tree = d05d5a0 + 2-file
+runner-knob patch (`/tmp/p03_runner_knob.patch` on the moonlab host).
 
 ---
 
