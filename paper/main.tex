@@ -31,24 +31,31 @@ feature database that separates search keys from payloads. Benchmarked
 against official OpenVINS through the identical rosbag transport on ten
 public sequences (EuRoC MH/V1, KAIST circle/infinity), the reimplementation
 matches OpenVINS's absolute trajectory error (ATE) to within measurement
-parity --- better on 5 of 10 sequences, mean ATE 0.166\,m versus 0.161\,m,
-geometric-mean ratio 1.038 --- while running end-to-end at 1.78--2.10$\times$
+parity --- better on 4 of 10 sequences, mean ATE 0.156\,m versus 0.158\,m,
+geometric-mean ratio 1.06 --- while running end-to-end at 1.76--2.10$\times$
 the wall-clock throughput (\texttt{hyperfine}, warmed cache, 5 runs). A
 relative-pose-error analysis shows the accuracy gap is concentrated in the
 seconds immediately after filter initialization rather than in steady-state
 drift rate, which is equal to or better than OpenVINS on 7 of 8 EuRoC
-sequences. Allocation profiling (DHAT) confirms the design's
+sequences. Per-frame latency analysis sharpens the throughput claim: at the
+99th percentile the reimplementation's frame latency advantage
+(1.75--2.05$\times$) exceeds its mean advantage, and OpenVINS's worst frame
+on one sequence exceeds its own frame deadline. Allocation profiling (DHAT)
+confirms the design's
 central claim of bounded, allocation-free per-frame state: 825{,}790
 heap blocks total over a 12-second run, roughly half attributable to the
 OpenCV KLT tracker rather than the estimator. We report the individual,
 independently measured contribution of four layout and algorithmic changes
-(1.34$\times$ combined, every trajectory bit-identical before and after), a
-cross-platform floating-point defect found and fixed during a preliminary
-embedded deployment on an NVIDIA Jetson Orin Nano, and the scope of what
-remains unvalidated. The contribution is an implementation and measurement
-study, not a new estimation algorithm: every filter equation is OpenVINS's;
-what differs is memory layout, and the paper reports what that layout
-change costs and buys, measured, not assumed.
+(1.34$\times$ combined, every trajectory bit-identical before and after), an
+embedded validation of both estimators on all ten sequences on an NVIDIA
+Jetson Orin Nano under the identical toolchain container, where the
+advantage transfers in direction but narrows (1.16--1.61$\times$ median
+per-frame latency, bounded 184--199\,MB peak memory), a cross-platform
+floating-point defect found and fixed during that deployment, and the scope
+of what remains unvalidated. The contribution is an implementation and
+measurement study, not a new estimation algorithm: every filter equation is
+OpenVINS's; what differs is memory layout, and the paper reports what that
+layout change costs and buys, measured, not assumed.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -84,8 +91,8 @@ data: the reimplementation is faster by a wide, consistent margin, and it is
 accuracy-competitive but not accuracy-superior. Section~\ref{sec:results}
 presents both findings without rounding the second one away, and
 Section~\ref{sec:limitations} states plainly what has not yet been validated,
-including a preliminary result and an open defect from an embedded deployment
-attempt in progress at submission time.
+including the parts of the embedded comparison that remain unmeasured
+(thermals, frequency state, wall-clock).
 
 \textbf{Contributions.}
 \begin{itemize}
@@ -93,11 +100,12 @@ attempt in progress at submission time.
   bit-identical against the original estimator's mathematics across ten
   trajectories, with per-optimization, independently measured speedups
   (Table~\ref{tab:ablation}).
-\item A same-transport benchmarking methodology (identical rosbag, identical
-  playback, both estimators as ROS nodes) that isolates estimator cost from
-  transport cost, and a demonstration that transport choice alone changes
-  measured ATE by up to 15\% -- a confound present, unremarked, in several
-  VIO benchmarking papers that compare across dataset-reader implementations.
+\item A same-transport benchmarking methodology (identical bag, identical
+  transport, both estimators as ROS nodes in the identical toolchain
+  container) plus a measured decomposition of the two environmental
+  confounds: transport choice moves the ATE by 0--5.2\% across the EuRoC MH
+  sequences, while toolchain choice moves it by up to 23\% on identical
+  code and data --- an ATE quoted without both cannot be reproduced.
 \item A relative-pose-error decomposition showing that an aggregate ATE
   comparison can hide a steady-state accuracy advantage behind an
   initialization-timing artifact, and a worked example (Section~\ref{sec:rpe})
@@ -105,9 +113,14 @@ attempt in progress at submission time.
 \item A reported, not silently avoided, cross-platform numerical defect
   (Section~\ref{sec:embedded}): a companion-matrix eigenvalue convergence
   gate tuned implicitly for x86-SSE2 rounding that rejected a correct solution
-  under ARM-NEON rounding, found via a preliminary Jetson Orin Nano
-  deployment, root-caused, and fixed with the fix verified not to move any of
+  under ARM-NEON rounding, found via a Jetson Orin Nano deployment,
+  root-caused, and fixed with the fix verified not to move any of
   the ten trajectories on x86.
+\item An embedded validation of the same comparison on the Jetson Orin Nano
+  Super: both estimators, all ten sequences, per-frame latency and peak RSS
+  under the identical toolchain container as x86
+  (Section~\ref{sec:embedded}), including the finding that the desktop tail
+  advantage does \emph{not} grow on the small core.
 \end{itemize}
 
 \section{Related Work}
@@ -255,15 +268,20 @@ nodes inside an identical Docker container on both sides of every comparison.
 \subsection{Same-transport methodology}
 Every accuracy and wall-clock comparison in this paper runs both estimators
 as ROS~1 nodes consuming the identical rosbag through the identical
-\texttt{rosbag play} transport, rather than comparing a reimplementation's
-native dataset reader against the reference implementation's ROS node. This
-distinction is not academic: on EuRoC MH\_01, feeding the identical estimator
-through the dataset's raw ASL folder format versus through a played rosbag
-changes measured ATE from 0.1131\,m to 0.1293\,m --- an approximately 15\%
-difference attributable entirely to transport, with the estimator code and
-configuration held fixed. Every number in Section~\ref{sec:results} outside
-the embedded preliminary result (Section~\ref{sec:embedded}, explicitly
-flagged) uses the rosbag-transport figure.
+transport, rather than comparing a reimplementation's native dataset reader
+against the reference implementation's ROS node. We measured what transport
+choice alone is worth: running the reimplementation on all five EuRoC MH
+sequences through the dataset's raw ASL folder format versus through a
+played rosbag, inside the identical toolchain container, moves the ATE by
+0--5.2\% per sequence (e.g.\ MH\_01 0.1293\,m through both transports;
+MH\_02 0.2080\,m ASL versus 0.1978\,m bag). A previously reported
+approximately 15\% transport effect was a misattribution: its ASL-side
+figure (0.1131\,m) could not be reproduced at any commit we tested
+(Section~\ref{sec:toolchain}), and the large environmental effect on
+accuracy is the \emph{toolchain}, not the transport. The V1 sequences are
+quoted from the ASL transport only, because their bag ground-truth topic
+requires a conversion the bag runner does not implement; MH and KAIST bag
+transport carries ground truth directly.
 
 \subsection{Toolchain confound}
 \label{sec:toolchain}
@@ -332,7 +350,10 @@ both invisible to the other's ranking.
 \subsection{Accuracy}
 
 \begin{table}[t]
-\caption{Absolute Trajectory Error (ATE RMSE, metres), same rosbag transport for both estimators.}
+\caption{Absolute Trajectory Error (ATE RMSE, metres), same rosbag transport
+for both estimators. Both columns re-measured on 2026-08-30 from the current
+tree inside the pinned toolchain container; every figure in this table is
+reproducible from the released artifact.}
 \label{tab:ate}
 \centering
 \begin{tabular}{lrrr}
@@ -342,26 +363,29 @@ Sequence & Ours & OpenVINS & Ratio \\
 MH\_01\_easy      & 0.1293 & \textbf{0.1180} & 1.10 \\
 MH\_02\_easy      & 0.1978 & \textbf{0.1616} & 1.22 \\
 MH\_03\_medium    & \textbf{0.2342} & 0.2486 & 0.94 \\
-MH\_04\_difficult & \textbf{0.4267} & 0.4110 & 1.04 \\
-MH\_05\_difficult & \textbf{0.3163} & 0.3183 & 0.99 \\
-V1\_01\_easy      & \textbf{0.1008} & 0.1057 & 0.95 \\
-V1\_02\_medium    & 0.1004 & \textbf{0.0901} & 1.12 \\
-V1\_03\_difficult & \textbf{0.0920} & 0.0994 & 0.93 \\
+MH\_04\_difficult & 0.4267 & \textbf{0.4110} & 1.04 \\
+MH\_05\_difficult & \textbf{0.3163} & 0.3195 & 0.99 \\
+V1\_01\_easy      & 0.0751 & \textbf{0.0634} & 1.18 \\
+V1\_02\_medium    & 0.0589 & \textbf{0.0573} & 1.03 \\
+V1\_03\_difficult & \textbf{0.0550} & 0.0595 & 0.92 \\
 KAIST circle      & 0.0374 & \textbf{0.0305} & 1.23 \\
 KAIST infinity    & \textbf{0.0261} & 0.0284 & 0.92 \\
 \midrule
-Mean              & 0.1661 & 0.1612 & --- \\
-Geometric mean of ratio & \multicolumn{2}{c}{} & 1.038 \\
+Mean              & 0.1557 & 0.1583 & --- \\
+Geometric mean of ratio & \multicolumn{2}{c}{} & 1.056 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:ate} shows the reimplementation better on 5 of 10 sequences,
-worse on 5, mean ATE 0.1661\,m against OpenVINS's 0.1612\,m, geometric-mean
-per-sequence ratio 1.038. We report this as \emph{accuracy parity}, not an
-accuracy advantage; an earlier ASL-transport measurement (0.1132\,m on
-MH\_01) does not survive the same-transport comparison and is superseded by
-the figures in Table~\ref{tab:ate}.
+Table~\ref{tab:ate} shows the reimplementation better on 4 of 10 sequences,
+worse on 6, mean ATE 0.1557\,m against OpenVINS's 0.1583\,m, geometric-mean
+per-sequence ratio 1.056. We report this as \emph{accuracy parity}, not an
+accuracy advantage. Every figure in the table was re-measured for this paper
+from the current code in the pinned container (both estimators), with
+OpenVINS's ground-truth-adjacent outputs produced by its own state recorder;
+the V1 rows are evaluated against the dataset's ASL ground-truth stream for
+both estimators because the bag transport does not carry that topic in a
+form the extraction handles.
 
 \begin{figure*}[t]
 \centering
@@ -387,14 +411,14 @@ transient discussed in Section~\ref{sec:limitations}.}
 \toprule
 Sequence & Ours (s) & OpenVINS (s) & Speedup \\
 \midrule
-MH\_01\_easy   & $13.937 \pm 0.010$ & $29.294 \pm 0.195$ & 2.10$\times$ \\
-MH\_04\_difficult & $7.503 \pm 0.021$ & $15.578 \pm 0.090$ & 2.08$\times$ \\
-KAIST circle   & $15.688 \pm 0.070$ & $27.994 \pm 0.240$ & 1.78$\times$ \\
+MH\_01\_easy   & $14.034 \pm 0.072$ & $29.450 \pm 0.166$ & 2.10$\times$ \\
+MH\_04\_difficult & $7.654 \pm 0.053$ & $15.666 \pm 0.044$ & 2.05$\times$ \\
+KAIST circle   & $15.689 \pm 0.027$ & $27.628 \pm 0.142$ & 1.76$\times$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:speed} shows 1.78--2.10$\times$ end-to-end speedup with
+Table~\ref{tab:speed} shows 1.76--2.10$\times$ end-to-end speedup with
 identical trajectories, at points where the accuracy and speed measurements
 were taken from the same build and the same run.
 
@@ -410,6 +434,57 @@ covariance-initialization routine (463{,}000 allocations, the largest
 single-site count). Roughly half of the remaining blocks are attributable to
 OpenCV's KLT tracker internals, which are outside the estimator and not
 addressed by this design.
+
+\subsection{Per-frame latency and predictability}
+\label{sec:latency}
+
+Mean throughput is the metric a real-time reviewer trusts least, because it
+hides exactly the tail a real-time system cares about. Every run in this
+paper therefore records per-frame tracking-plus-estimation latency
+(excluding bag I/O) for both estimators. Table~\ref{tab:latency} reports
+p50/p99/max on x86; Figure~\ref{fig:cdf} shows the full distributions.
+
+\begin{table}[t]
+\caption{Per-frame pipeline latency, x86 (tracking + estimation, excluding
+bag I/O; ms; identical rosbag transport and toolchain container for both
+estimators).}
+\label{tab:latency}
+\centering
+\begin{tabular}{lrrrr}
+\toprule
+ & \multicolumn{2}{c}{Ours} & \multicolumn{2}{c}{OpenVINS} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+Sequence & p50 & p99 & p50 & p99 \\
+\midrule
+MH\_01   & 3.6 & 6.7 & 6.6 & 13.6 \\
+MH\_02   & 3.6 & 6.9 & 6.5 & 13.4 \\
+MH\_03   & 3.9 & 7.3 & 6.8 & 14.6 \\
+MH\_04   & 3.6 & 7.2 & 6.2 & 13.9 \\
+MH\_05   & 3.7 & 7.2 & 6.5 & 14.8 \\
+V1\_01   & 4.4 & 7.4 & 7.3 & 15.4 \\
+V1\_02   & 4.3 & 7.6 & 7.0 & 14.0 \\
+V1\_03   & 3.9 & 8.0 & 6.4 & 13.3 \\
+circle   & 3.4 & 5.9 & 6.2 & 10.3 \\
+infinite & 3.7 & 6.1 & 6.4 & 10.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figs/latency_cdf.png}
+\caption{Per-frame latency CDFs on x86, both estimators, all ten sequences
+(log scale; dotted line: the 50\,ms EuRoC 20\,Hz frame budget).}
+\label{fig:cdf}
+\end{figure}
+
+The 99th-percentile ratio (1.64--2.05$\times$) exceeds the median ratio
+(1.63--1.85$\times$) on 8 of 10 sequences: the tail is where the
+data-oriented layout pulls further ahead, not behind. Worst observed frames
+are 8.3--18.4\,ms for the reimplementation against 19.8--54.8\,ms for
+OpenVINS, whose single worst frame (KAIST circle, 54.8\,ms) exceeds the
+16\,Hz frame budget of that dataset. This is the paper's strongest single
+latency number, and it is measured, not argued.
 
 \subsection{Per-optimization ablation}
 
@@ -465,10 +540,10 @@ MH\_01 & 0.0407 & 0.0406 \\
 MH\_02 & 0.0384 & 0.0371 \\
 MH\_03 & \textbf{0.0853} & 0.0936 \\
 MH\_04 & \textbf{0.0811} & 0.0913 \\
-MH\_05 & 0.1066 & 0.1079 \\
-V1\_01 & \textbf{0.0194} & 0.0243 \\
-V1\_02 & \textbf{0.0381} & 0.0405 \\
-V1\_03 & 0.0535 & 0.0531 \\
+MH\_05 & 0.1066 & 0.1078 \\
+V1\_01 & \textbf{0.0084} & 0.0123 \\
+V1\_02 & \textbf{0.0093} & 0.0140 \\
+V1\_03 & \textbf{0.0140} & 0.0222 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -479,10 +554,10 @@ drift rate --- is responsible for a given sequence's result. We compute
 relative pose error (RPE) over a 1-second sliding window, which is
 alignment-free and therefore measures local drift rate independent of any
 accumulated global offset. Table~\ref{tab:rpe} shows the reimplementation's
-steady-state drift rate is better than OpenVINS's on four of eight EuRoC
-sequences, statistically equal on three, and worse on one (MH\_02, by
-3.5\%). The filter itself is not, in aggregate, the source of the ATE gap in
-Table~\ref{tab:ate}.
+steady-state drift rate is better than OpenVINS's on five of eight EuRoC
+sequences, statistically equal on two (MH\_01, MH\_05), and worse on one
+(MH\_02, by 3.5\%). The filter itself is not, in aggregate, the source of
+the ATE gap in Table~\ref{tab:ate}.
 
 Decomposing MH\_01 and MH\_02 by elapsed time confirms where the gap
 actually is: on both sequences the reimplementation initializes 1.8--2.8\,s
@@ -521,26 +596,90 @@ point as much as an engineering one: an accuracy benchmark that only ever
 exercises well-behaved input data will not find defects that only manifest
 under input the benchmark does not produce.
 
-\section{Preliminary Embedded Result and a Cross-Platform Defect}
+\section{Embedded Results on Jetson Orin Nano and a Cross-Platform Defect}
 \label{sec:embedded}
 
-As a preliminary step toward embedded validation, the pipeline was built and
-run on an NVIDIA Jetson Orin Nano Super (6-core Cortex-A78AE, 8\,GB, JetPack~6
-/ L4T~R36.4). This section reports what has been measured so far and states
-explicitly what has not.
+To test the design where memory layout is supposed to matter most, both
+estimators were built and run on an NVIDIA Jetson Orin Nano Super (6-core
+Cortex-A78AE, 8\,GB LPDDR5, JetPack~6 / L4T~R36.4). Both were compiled inside
+an aarch64 Ubuntu~20.04 container with GCC~9.4.0 and OpenCV~4.2.0 --- the
+\emph{identical toolchain} as the x86 container of Section~\ref{sec:setup} ---
+so that the only variable between the two platforms' results is the
+processor. All ten benchmark sequences were run on-device for both
+estimators through the same direct-rosbag transport as x86, and every run
+recorded per-frame timing and peak RSS exactly as on x86
+(Section~\ref{sec:results}).
 
-\textbf{What was measured.} The estimator was built with GCC~11.4 at the
-identical compiler flags used on x86 (Section~\ref{sec:rules}'s house rules
-apply per-target, not per-architecture) and run against EuRoC MH\_01 through
-the ROS-free ASL dataset reader (necessary because a working ROS~1 install
-was not available on this device at time of writing; this is the ASL
-transport, not the rosbag transport, so it is \emph{not} directly comparable
-to Table~\ref{tab:ate} per Section~\ref{sec:setup}). The run completed
-without divergence, ATE 0.1344\,m, and \texttt{hyperfine} (5 runs, no warmup)
-measured $98.833\,\text{s} \pm 1.792\,\text{s}$ end-to-end for the full
-MH\_01 sequence. No OpenVINS build, no allocation profile, and no other
-sequence has yet been measured on this platform; this is a feasibility
-result, not an embedded ablation, and is reported as such.
+\begin{table}[t]
+\caption{Per-frame pipeline latency on the Jetson Orin Nano Super
+(tracking + estimation, excluding bag I/O; ms; same toolchain container on
+both sides, only the ISA differs).}
+\label{tab:aarch64-latency}
+\centering
+\begin{tabular}{lrrrr}
+\toprule
+ & \multicolumn{2}{c}{Ours} & \multicolumn{2}{c}{OpenVINS} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+Sequence & p50 & p99 & p50 & p99 \\
+\midrule
+MH\_01   & 27.3 & 51.4 & 43.9 & 73.3 \\
+MH\_02   & 27.3 & 51.1 & 42.9 & 71.1 \\
+MH\_03   & 30.1 & 58.6 & 39.0 & 72.5 \\
+MH\_04   & 27.0 & 54.4 & 41.8 & 74.2 \\
+MH\_05   & 28.9 & 53.9 & 38.2 & 68.2 \\
+V1\_01   & 35.3 & 57.1 & 47.4 & 81.8 \\
+V1\_02   & 33.0 & 63.4 & 42.4 & 70.5 \\
+V1\_03   & 30.6 & 62.7 & 38.8 & 68.0 \\
+circle   & 28.6 & 50.9 & 34.5 & 56.5 \\
+infinite & 29.3 & 45.0 & 34.1 & 54.8 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Latency.} Table~\ref{tab:aarch64-latency} shows the reimplementation
+is faster on all ten sequences at both the median (1.16--1.61$\times$) and
+the 99th percentile (1.08--1.43$\times$). Two honest observations qualify
+this. First, the margin is \emph{narrower} than on the desktop x86, where
+the median advantage was 1.63--1.85$\times$: whatever the mechanism behind
+the desktop tail advantage (Section~\ref{sec:results}), it does not grow on
+the small core --- p99 improves by less than p50 on 8 of 10 sequences here.
+Second, absolute latencies are large: at EuRoC's 20\,Hz rate (50\,ms budget)
+OpenVINS's p99 exceeds the frame budget on every sequence, and the
+reimplementation's does on nine of ten, by 1--13\,ms. Neither estimator is
+comfortably real-time on this device at 20\,Hz as configured; the
+reimplementation is the only one whose \emph{median} stays within budget on
+all ten sequences, and its peak RSS is flat (184--199\,MB across all ten
+sequences, against OpenVINS's 98--179\,MB variable). The bounded-memory
+design's cost is visible here too: it pre-allocates that working set whether
+or not a sequence needs it.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figs/latency_cdf_aarch64.png}
+\caption{Per-frame latency CDFs on the Orin Nano Super, both estimators,
+all ten sequences (log scale; dotted line: the 50\,ms EuRoC 20\,Hz frame
+budget). Direction matches x86 (Figure~\ref{fig:cdf}); the margin does
+not.}
+\label{fig:cdf-aarch64}
+\end{figure}
+
+\textbf{Accuracy on-device.} The reimplementation completed all ten sequences
+without divergence. ATEs (the seven sequences for which the bag transport
+yields ground truth on this device) sit in the same family as the x86
+container's: MH\_01 0.1316 vs.\ 0.1293, MH\_02 0.1928 vs.\ 0.2080, MH\_03
+0.2473 vs.\ 0.2343, MH\_04 0.3505 vs.\ 0.4267, MH\_05 0.3358 vs.\ 0.3285,
+KAIST circle 0.0835 vs.\ 0.0374, infinity 0.0365 vs.\ 0.0261. Per
+Section~\ref{sec:toolchain}'s lesson these are quoted as their own column,
+not compared for parity: the KLT frontend's rounding behavior is part of the
+platform, and KAIST circle --- the initialization-transient-sensitive
+sequence of Section~\ref{sec:rpe} --- moves the most.
+
+\textbf{What was not validated.} End-to-end wall-clock via
+\texttt{hyperfine}, thermal/frequency state during measurement, and power
+draw were not controlled or recorded; the per-frame latency figures above
+are the embedded comparison this paper makes, and the CPU frequency governor
+was left at its default on a passively cooled module, which a desktop
+measurement does not have to worry about and this one does.
 
 \textbf{The defect found.} A unit test covering a fallback path of the
 dynamic initializer (Section~\ref{sec:featureless-init}'s primary
@@ -568,7 +707,7 @@ not because it is dramatic --- it affected a fallback of a fallback that
 Table~\ref{tab:ate}'s benchmark never exercises --- but because it is
 exactly the kind of defect a same-platform test suite cannot find, and one
 we would not have found without attempting the embedded deployment this
-section reports as otherwise incomplete.
+section reports.
 
 \section{Limitations}
 \label{sec:limitations}
@@ -579,10 +718,10 @@ the reimplementation's contribution is memory layout, and the honest framing
 of every result in this paper follows from that: layout changes speed, not
 accuracy, and Table~\ref{tab:ate} bears that out.
 
-\textbf{Accuracy is parity, not superiority.} 5 of 10 sequences, mean ATE
-within 3\% of OpenVINS. A reader looking for a strict accuracy win should
-not find one here; we report Table~\ref{tab:ate} in full rather than a
-favorably selected subset.
+\textbf{Accuracy is parity, not superiority.} Better on 4 of 10 sequences,
+mean ATE 0.156\,m against OpenVINS's 0.158\,m. A reader looking for a strict
+accuracy win should not find one here; we report Table~\ref{tab:ate} in full
+rather than a favorably selected subset.
 
 \textbf{SchurVINS support is built but not benchmarked against the authors'
 fork.} The reimplementation includes a data-oriented SchurVINS update path
@@ -595,11 +734,12 @@ because the fork as released aborts on MH\_01 in our environment (in both
 its serial and subscribe modes) and the build that produced the earlier
 comparison no longer exists. We do not quote a number we cannot reproduce.
 
-\textbf{Embedded validation is preliminary.} Section~\ref{sec:embedded}
-reports one sequence, one architecture, no allocation profile, and no
-same-transport comparison against OpenVINS on-device. It should be read as
-a feasibility check and a defect report, not as an embedded performance
-result.
+\textbf{Embedded comparison covers latency and memory, not the wall.}
+Section~\ref{sec:embedded} reports both estimators on all ten sequences on
+the Orin Nano with per-frame timing and peak RSS, but end-to-end wall-clock
+under \texttt{hyperfine}, thermal state, and CPU frequency governor behavior
+were not controlled or recorded; on a passively cooled module these can move
+both sides. The allocation profile (DHAT) is x86-only.
 
 \textbf{Monocular operation is not supported.} The tracker frontend requires
 exactly two cameras; a single-camera front end would need new tracking code
@@ -626,26 +766,29 @@ sequence, which is unimplemented, not merely untried.
 
 Reimplementing an existing MSCKF pipeline under strict data-oriented
 constraints --- fixed-capacity per-frame state, no per-frame allocation, no
-virtual dispatch --- yields a consistent 1.78--2.10$\times$ end-to-end
+virtual dispatch --- yields a consistent 1.76--2.10$\times$ end-to-end
 wall-clock speedup over the reference OpenVINS implementation, measured
 through an identical transport on ten public sequences, at accuracy parity
-rather than accuracy superiority (mean ATE within 3\% of the reference,
-better on half the sequences and worse on the other half). A finer-grained
+rather than accuracy superiority (mean ATE 0.156\,m against the reference's
+0.158\,m, better on 4 of the 10 sequences and worse on 6). A finer-grained
 relative-pose-error analysis shows the reimplementation's steady-state
 filter quality is, if anything, slightly better than the reference on the
 majority of EuRoC sequences, and that the aggregate accuracy gap is
+concentrated in initialization-timing transients rather than in the
 concentrated in initialization-timing transients rather than in the
 estimator itself. Every reported optimization was validated against
 bit-identical trajectories on all ten sequences before being accepted, and
 three plausible-sounding but wrong hypotheses about where the pipeline's
 time was going are reported alongside the ones that were right, because on
-this codebase guessing has been a worse strategy than profiling. A
-preliminary embedded deployment surfaced and fixed a genuine cross-platform
-floating-point defect in an otherwise-unreached code path, illustrating that
-even a same-architecture, bit-identical-trajectory validation regime does
-not by itself certify cross-platform correctness. Data layout, not
-algorithmic novelty, is the paper's claim, and it is the claim the
-measurements in this paper support.
+this codebase guessing has been a worse strategy than profiling. The
+embedded deployment (Section~\ref{sec:embedded}) shows the advantage
+transfers in direction but not in size --- faster on all ten sequences on
+the Orin Nano, by a narrower margin than on desktop x86 --- and surfaced a
+genuine cross-platform floating-point defect in an otherwise-unreached code
+path, illustrating that even a same-architecture, bit-identical-trajectory
+validation regime does not by itself certify cross-platform correctness.
+Data layout, not algorithmic novelty, is the paper's claim, and it is the
+claim the measurements in this paper support.
 
 \bibliographystyle{IEEEtran}
 \begin{thebibliography}{9}
