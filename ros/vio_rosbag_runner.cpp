@@ -272,7 +272,14 @@ int main(int argc, char** argv) {
         global_arena.allocate(sizeof(core::Feature) * core::TRACKER_MAX_FEATURES * 2U, alignof(core::Feature)));
     if (!vio || !tracker || !image_storage || !observations) return 4;
 
-    const msckf::VioManagerOptions options = make_kaist_options();
+    // Env override so a config sweep does not need a rebuild per point
+    // (same pattern and same knob name as dod_asl_runner.cpp).
+    auto env_int = [](const char* name, int fallback) {
+        const char* value = std::getenv(name);
+        return value != nullptr ? std::atoi(value) : fallback;
+    };
+    msckf::VioManagerOptions options = make_kaist_options();
+    options.use_schur_msckf = env_int("VIO_SCHUR", options.use_schur_msckf ? 1 : 0) != 0;
     msckf::init_vio_manager(*vio, options);
     core::TrackerOptions tracker_options;
     if (!core::init_tracker(*tracker, tracker_options, options.cam_models, 2,
