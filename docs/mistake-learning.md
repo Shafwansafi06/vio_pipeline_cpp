@@ -12,11 +12,39 @@ Format:
 - **Rule** — the generalisation, if there is one. Not every mistake has one.
 - **Reaches forward to** — which open tickets this can still bite.
 
-Newest at the top within each section. Last updated: 2026-08-30 (M-17, T-002).
+Newest at the top within each section. Last updated: 2026-08-30 (M-18, T-003).
 
 ---
 
 ## A. Process mistakes (the expensive ones)
+
+### M-18 — Trusting a recorded baseline as the oracle
+
+- **Believed:** the ten ATEs in CLAUDE.md are the accuracy gate. Run the sweep,
+  compare against them, done.
+- **True:** eight of the ten do not reproduce on the lab host — MH_01 comes back
+  0.1282 against a recorded 0.1131. Not from this branch: the pre-branch control
+  tree gives byte-identical output, and the lab's own 2026-08-26 binary gives
+  0.1328. The recorded EuRoC numbers appear to have been taken in the container
+  (OpenCV 4.2.0 / g++ 9.4.0), while the host is OpenCV 4.5.4 / g++ 11.4.0, and
+  the KLT frontend is OpenCV's. The two sequences that were run in the container
+  matched to four decimals.
+- **Cost:** none to the conclusion, because a control tree was run alongside.
+  Without it, the honest reading of "MH_01 moved 13%" would have been "the
+  parallax commit broke the filter", and the next hours would have gone into
+  debugging a commit that provably changes nothing.
+- **Rule:** **a recorded number is not a control; a control is a control.** When
+  the question is "did my change move this", run the unchanged tree in the same
+  environment on the same data and diff the outputs. A stored constant silently
+  encodes an environment, and environments drift while the constant does not.
+- **Second rule:** compare artefacts, not summaries. `cmp` on the estimate CSVs
+  answers "did anything change" exactly; ATE to four decimals can hide a change
+  and, worse, can invent one.
+- **Third rule:** a gate needs its environment pinned next to its numbers.
+  Compiler and OpenCV version belong in the gate definition, because the
+  frontend is a third-party library and its output is part of the result.
+- **Reaches forward to:** T-004, T-006, T-008 — all compare against baselines,
+  and T-013 exists to pin this one down.
 
 ### M-17 — Announcing a pass from a test that tested nothing
 
@@ -226,5 +254,6 @@ let them rot here.
   everywhere, so no live gap, but a lambda sweep run against the schur path
   would return a null result that looks like evidence. Re-check the flag before
   T-006.
-- Bit-exactness of `15b0860` rests on an argument (x / 1.0 is exact in
-  IEEE-754), not a measurement. Nothing local can test it. T-003 is the oracle.
+- ~~Bit-exactness of `15b0860` rests on an argument, not a measurement.~~
+  **Measured 2026-08-30 (T-003): 10/10 sequences byte-identical against the
+  pre-branch control tree.** The argument now has evidence behind it.

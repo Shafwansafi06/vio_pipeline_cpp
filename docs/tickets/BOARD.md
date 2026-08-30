@@ -19,7 +19,7 @@ this system):
    code. Do not retry it later from memory.
 4. Nothing lands without the accuracy gate (T-003) green.
 
-Last updated: 2026-08-30 (T-001, T-002 closed).
+Last updated: 2026-08-30 (T-001, T-002, T-003 closed).
 
 ---
 
@@ -29,8 +29,8 @@ Last updated: 2026-08-30 (T-001, T-002 closed).
 |----|-------|--------|--------|
 | T-001 | Commit the FGI harness + diagnostics | **done** 862b3b8 | — |
 | T-002 | Commit the whitening wiring (lambda=0) | **done** 15b0860 | — |
-| T-003 | Accuracy gate: 10-sequence sweep on moonlab | todo | T-001, T-002 |
-| T-004 | Does 60_4 converge with max_dist=200? | todo | T-005, T-006, T-008 |
+| T-003 | Accuracy gate: 10-sequence sweep on moonlab | **done** PASS | — |
+| T-004 | Does 60_4 converge with max_dist=200? | **next** | T-005, T-006, T-008 |
 
 ## Next
 
@@ -122,19 +122,76 @@ settles it.
 
 ## T-003 — Accuracy gate
 
-**Status:** todo — **cannot run on the laptop**, no EuRoC/KAIST bags here
-(`data/` holds only FGI GNSS CSVs). Runs on moonlab.
+**Status:** done, 2026-08-30. **PASS — 10/10 sequences byte-identical.**
 
-```
-DATA=$PWD/data/mav0 NAME=acv tools/sweep.sh
-```
+**Method, and why it is stronger than the gate as written.** The gate compares
+ATEs against a recorded table. That only works if the table reproduces, which
+it turned out not to (below). So instead of trusting the table, both trees were
+run side by side: `862b3b8..15b0860` (head) and `b6e9aa2` (base, the pre-branch
+tip) shipped to moonlab with `git archive`, built with identical flags, run on
+identical data, and the **estimate CSVs compared byte-for-byte**.
 
-**Exit condition — bit-identical to:**
-MH_01 0.1131, MH_02 0.1744, MH_03 0.2223, MH_04 0.4580, MH_05 0.3074,
-V1_01 0.0494, V1_02 0.0551, V1_03 0.0560, circle 0.0374, infinity 0.0261.
+| | |
+|---|---|
+| EuRoC, 8 seq, host ASL path | head == base, byte-identical, 8/8 |
+| KAIST circle + infinity, container ROS path | head == base, byte-identical, 2/2 |
+| Oracle discriminates? | yes — 8 distinct md5s across the 8 sequences |
 
-Plus `ctest` 6/6. A moved number is an accuracy change wearing a refactor
-costume; stop and explain it before landing anything.
+That last row is the M-17 check: a comparison that cannot tell two things apart
+proves nothing. Distinct hashes per sequence show the comparison has resolution.
+
+**Conclusion: `15b0860` is a true no-op at lambda = 0**, measured rather than
+argued. The IEEE-754 reasoning in the commit message is now backed by output.
+
+**Environments used (they are not interchangeable — see T-013):**
+- Host `stork`: OpenCV 4.5.4, g++ 11.4.0, `dod_asl_runner`, ASL directories.
+- `ros_container_v2`: OpenCV 4.2.0, g++ 9.4.0, `vio_rosbag_runner`, bags.
+
+Reproduce: trees at `/media/storage/moonlab/vio_parity/acv/{head,base}`,
+outputs in `acv/runs/`; container copies at `/workspace/acv/`.
+
+---
+
+## T-013 — The recorded gate table only reproduces in the container
+
+**Status:** todo. Raised by T-003. Does not block T-004.
+
+KAIST reproduces the recorded numbers **exactly** — circle 0.0374, infinity
+0.0261, to four decimals, run in `ros_container_v2`. The eight EuRoC sequences,
+run on the host, do not:
+
+| seq | recorded | host, 2026-08-30 | delta |
+|---|---|---|---|
+| MH_01 | 0.1131 | 0.1282 | +13.4% |
+| MH_02 | 0.1744 | 0.1595 | -8.5% |
+| MH_03 | 0.2223 | 0.2234 | +0.5% |
+| MH_04 | 0.4580 | 0.4416 | -3.6% |
+| MH_05 | 0.3074 | 0.3115 | +1.3% |
+| V1_01 | 0.0494 | 0.0499 | +1.0% |
+| V1_02 | 0.0551 | 0.0553 | +0.4% |
+| V1_03 | 0.0560 | 0.0564 | +0.7% |
+
+**Not caused by this branch.** The control tree `b6e9aa2` produces byte-identical
+output to head on all eight, and the lab's own binary from 2026-08-26 gives
+0.1328 on MH_01 — also not 0.1131. The deltas go in both directions, so this is
+not a regression; it is a different environment.
+
+**Leading hypothesis, and it fits every observation:** the recorded EuRoC table
+was produced in the container. Host is OpenCV 4.5.4 / g++ 11.4.0; container is
+OpenCV 4.2.0 / g++ 9.4.0. The KLT frontend is OpenCV's, so a different OpenCV
+gives different tracks and therefore a different trajectory — and the two
+sequences that *were* run in the container match to four decimals.
+
+**Ruled out on the way:**
+- Data provenance. `$R/data/mav0` is a bag->ASL conversion (`.pgm`, truncated
+  timestamps) rather than the official zip. Extracted the official MH_01 ASL and
+  ran it: **bit-identical output** to the converted copy. The conversion is
+  faithful and is not the cause.
+
+**Exit condition:** build `dod_asl_runner` inside `ros_container_v2` and run
+MH_01. If it returns 0.1131, the hypothesis is confirmed; pin the gate to the
+container in CLAUDE.md and note that host numbers are a separate baseline. If it
+does not, something else moved and this becomes a real investigation.
 
 ---
 

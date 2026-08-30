@@ -93,8 +93,22 @@ circle 0.0374, infinity 0.0261. Every optimisation so far has left these
 bit-identical; one that moves them is an accuracy change wearing a performance
 costume, and needs to be argued on accuracy terms.
 
-Also run `ctest` (5/5) — `verify_dynamic_init` in particular catches
+Also run `ctest` (6/6) — `verify_dynamic_init` in particular catches
 initialiser changes that the EuRoC sweep does not.
+
+**These numbers are environment-bound.** Measured 2026-08-30: KAIST circle and
+infinity reproduce exactly when run in `ros_container_v2` (OpenCV 4.2.0, g++
+9.4.0), while the eight EuRoC sequences run on the host (OpenCV 4.5.4, g++
+11.4.0) come back up to 13% away — MH_01 at 0.1282, not 0.1131 — for code that
+is byte-identical to the recorded baseline's. The KLT frontend is OpenCV's, so
+the library version is part of the result. Run the gate in the container, and
+see `docs/tickets/BOARD.md` T-013.
+
+**Prefer a control tree to the recorded table.** To answer "did my change move
+anything", build the unchanged commit alongside it in the same environment and
+`cmp` the estimate CSVs. That is exact, immune to environment drift, and it is
+how T-003 established that the parallax whitening is a true no-op at
+lambda = 0.
 
 ## Two traps that have already bitten
 
