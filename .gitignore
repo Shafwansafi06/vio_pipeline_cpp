@@ -27,3 +27,12 @@ paper/*.blg
 paper/*.fls
 paper/*.fdb_latexmk
 paper/*.synctex.gz
+
+# External datasets (EuRoC/KAIST/FGI live outside the repo)
+/data/
+
+# Local agent tooling / vendored reading material
+paper/.agents/
+paper/skills-lock.json
+*.pdf.tmp
+dokumen.pub_*.pdf

@@ -12,6 +12,25 @@ extern long db_full_refusals;
 extern long feat_meas_overflow;
 extern long dbg_max_meas, dbg_max_count, dbg_shift_elems, dbg_compact_elems;
 extern long tri_cond_hist[32], tri_accept_hist[32];
+// Diagnostic-only: accepted triangulated depth (p_f[2], meters), bucketed in
+// 5m bins 0-100m (bin 19 catches everything >=95m). Never read by any
+// decision -- write-only accumulator per dod-style Rule 5 exception. Added to
+// answer "what does this pipeline actually triangulate to" on datasets whose
+// scene depth is unknown (indoor EuRoC calibration constants assumed
+// max_dist=75.0 is right; this is how that assumption gets checked).
+extern long tri_depth_hist[20];
+extern double tri_depth_sum;
+
+// Epipolar bearing-consistency diagnostic, defined in feature.cpp.
+// epi_computed: how many features had two cam-0 measurements with enough
+// baseline to run the check at all. epi_no_baseline: skipped because the two
+// clones were too close together (parallel bearings, undefined epipolar
+// plane) or too near each other in position -- not evidence of anything,
+// just insufficient parallax. epi_score_hist buckets the computed score
+// (0.0-1.0) into 20 bins of width 0.05; a genuinely single, static 3D point
+// should score near 0 in every bucket except the first.
+extern long epi_computed, epi_no_baseline;
+extern long epi_score_hist[20];
 
 struct ClonePose {
     Eigen::Matrix3d R;
@@ -72,6 +91,40 @@ struct Feature {
     double anchor_clone_timestamp = 0.0;
     Eigen::Vector3d p_FinA = Eigen::Vector3d::Zero();
 };
+
+// Multiplier on sigma_pix^2 for one feature, from the depth-to-parallax ratio
+// of its own triangulation: sigma_eff^2 = sigma_pix^2 * (1 + (lambda*Z/B)^2),
+// clamped to `max_scale`. Returns exactly 1.0 when lambda <= 0, which makes
+// the model a no-op bit-for-bit. Derivation and rationale in feature.cpp.
+// Requires feat.p_FinA to hold the current triangulation.
+double parallax_noise_scale(const Feature& feat, const ClonesCamera& clones,
+                            double lambda, double max_scale);
+extern long pnw_computed, pnw_no_depth, pnw_no_baseline;
+extern double pnw_scale_sum, pnw_scale_max;
+
+// Epipolar-plane bearing consistency between this feature's OLDEST and
+// NEWEST cam-0 measurement, using clone poses the filter has ALREADY
+// estimated -- unlike the featureless dynamic initializer (initialize/
+// initialization.cpp), which solves the epipolar-normal null-space for an
+// UNKNOWN relative translation direction via an eigendecomposition over many
+// features, this reuses the same bearing-rotate-and-cross-product identity
+// where the translation direction is already known from the state, so it
+// collapses to one cross product and one dot product per feature: no
+// eigensolve, no batching.
+//
+// Returns |n_hat . t_hat| in [0,1], where n is the epipolar-plane normal
+// (perpendicular to the true relative translation for any genuinely single,
+// static 3D point) and t is the known translation between the two clones.
+// Near 0 is consistent; large means these two measurements cannot be the
+// same physical point given the filter's own current pose estimates --
+// independent of chi2, since chi2 only asks "does this fit the linearized
+// state," never "is this the same point." Returns -1.0 (not computable) if
+// there are fewer than two cam-0 measurements or the two clones don't have
+// enough baseline to define an epipolar plane.
+//
+// DIAGNOSTIC ONLY as of this commit: computed and counted, does not reject
+// anything. See core/feature.cpp's definition for why.
+double epipolar_consistency_score(const Feature& feat, const ClonesCamera& clones);
 
 // Feature payloads are 2400 bytes each. Keeping them physically sorted by
 // featid meant every new feature memmove'd the tail of the array: measured

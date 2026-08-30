@@ -84,6 +84,10 @@ add_executable(verify_slam_jacobians tests/verify_slam_jacobians.cpp)
 target_link_libraries(verify_slam_jacobians PRIVATE vio_pipeline)
 add_test(NAME verify_slam_jacobians COMMAND verify_slam_jacobians)
 
+add_executable(verify_parallax_noise tests/verify_parallax_noise.cpp)
+target_link_libraries(verify_parallax_noise PRIVATE vio_pipeline)
+add_test(NAME verify_parallax_noise COMMAND verify_parallax_noise)
+
 add_executable(verify_dynamic_init tests/verify_dynamic_init.cpp)
 target_link_libraries(verify_dynamic_init PRIVATE vio_pipeline)
 add_test(NAME verify_dynamic_init COMMAND verify_dynamic_init)
@@ -147,6 +151,11 @@ if(VIO_BUILD_ROS1)
     target_link_libraries(vio_rosbag_runner_euroc_inject PRIVATE vio_frontend ${catkin_LIBRARIES})
     target_include_directories(vio_rosbag_runner_euroc PRIVATE ${catkin_INCLUDE_DIRS})
     target_link_libraries(vio_rosbag_runner_euroc PRIVATE vio_frontend ${catkin_LIBRARIES})
+
+    # FGI Masala Stereo-Visual-Inertial Dataset 2021 (high-altitude drone).
+    add_executable(vio_rosbag_runner_mid_altitude ros/vio_rosbag_runner_mid_altitude.cpp)
+    target_include_directories(vio_rosbag_runner_mid_altitude PRIVATE ${catkin_INCLUDE_DIRS})
+    target_link_libraries(vio_rosbag_runner_mid_altitude PRIVATE vio_frontend ${catkin_LIBRARIES})
 endif()
 
 # ============================================================================

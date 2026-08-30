@@ -296,6 +296,16 @@ void update_msckf(UpdaterMSCKFData& updater, State& state, core::Feature** featu
     for (int i = 0; i < feature_count; ++i) {
         core::Feature* feat = feature_vec[i];
         SubTimer tri_timer(msckf_ms_tri);
+        // Epipolar bearing-consistency, diagnostic only: computed and
+        // counted (core::epi_computed, core::epi_score_hist), but the return
+        // value does not affect accept/reject here. This is deliberate --
+        // house style requires measuring a threshold's real distribution
+        // before gating on it (CLAUDE.md: "tuned constants do not transfer
+        // between datasets... measured, not guessed"), and this check has
+        // never run on real data before this commit. Once the ten-sequence
+        // score distribution is measured, a rejection threshold can be
+        // chosen from evidence instead of invented.
+        (void)core::epipolar_consistency_score(*feat, clones_cam);
         bool success_tri = core::single_triangulation(*feat, clones_cam, updater.feat_init_options);
         bool success_refine = true;
         if (success_tri) {

@@ -1,15 +1,21 @@
-// EuRoC MAV variant of vio_rosbag_runner.cpp. Same estimator wiring; only the
-// topics, image resolution, and calibration differ. The configuration itself
-// now lives in tools/euroc_options.hpp, shared with the ROS-free ASL runner
-// (tools/dod_asl_runner.cpp) so the two can never drift apart.
+// FGI Masala Stereo-Visual-Inertial Dataset 2021 variant of
+// vio_rosbag_runner_euroc.cpp. Same estimator wiring and same queue-until-IMU-
+// covers-it discipline (see the comment on `pending` below); only the topics,
+// image resolution, and calibration differ, all in tools/mid_altitude_options.hpp.
+//
+// Unlike EuRoC's Leica /leica/position topic, this dataset's ground truth is
+// NOT in the bag -- it ships as a separate space-delimited
+// "ground truth/<seq>.txt" file (t x y z qx qy qz qw). Convert that file with
+// scripts/convert_fgi_groundtruth.py to the timestamp,px,py,pz,qx,qy,qz,qw CSV
+// scripts/evaluate_trajectory.py already expects; this runner does not touch
+// ground truth at all.
 #include "../arena.hpp"
 #include "../core/tracker.hpp"
 #include "../msckf/vio_manager.hpp"
-#include "../tools/euroc_options.hpp"
+#include "../tools/mid_altitude_options.hpp"
 #include "../type/quat_ops.hpp"
 
 #include <cv_bridge/cv_bridge.h>
-#include <geometry_msgs/PointStamped.h>
 #include <ros/ros.h>
 #include <rosbag/bag.h>
 #include <rosbag/view.h>
@@ -22,7 +28,7 @@
 #include <cstdio>
 #include <cstdlib>
 
-using namespace euroc;
+using namespace mid_altitude;
 
 namespace {
 
@@ -33,34 +39,24 @@ double stamp(const sensor_msgs::ImageConstPtr& image) {
 } // namespace
 
 int main(int argc, char** argv) {
-    ros::init(argc, argv, "vio_dod_rosbag_runner_euroc", ros::init_options::AnonymousName);
+    ros::init(argc, argv, "vio_dod_rosbag_runner_mid_altitude", ros::init_options::AnonymousName);
     if (argc < 3) {
         std::fprintf(stderr, "usage: %s BAG_PATH OUTPUT_PREFIX [max_seconds]\n", argv[0]);
         return 2;
     }
     const double max_seconds = argc > 3 ? std::atof(argv[3]) : -1.0;
-    // Skip the first N seconds of the bag, matching official's `bag_start`
-    // (their launch defaults it to 40 for MH_01). Needed so a wall-clock
-    // comparison against OpenVINS or ov_SchurVINS covers the same work.
     const double bag_start = argc > 4 ? std::atof(argv[4]) : 0.0;
     char estimate_path[1024];
-    char truth_path[1024];
     char timing_path[1024];
     std::snprintf(estimate_path, sizeof(estimate_path), "%s_estimate.csv", argv[2]);
-    std::snprintf(truth_path, sizeof(truth_path), "%s_groundtruth.csv", argv[2]);
     std::snprintf(timing_path, sizeof(timing_path), "%s_timing.csv", argv[2]);
     std::FILE* estimate = std::fopen(estimate_path, "w");
-    std::FILE* truth = std::fopen(truth_path, "w");
     std::FILE* timing = std::fopen(timing_path, "w");
-    if (!estimate || !truth || !timing) {
+    if (!estimate || !timing) {
         std::fprintf(stderr, "failed to create output CSV files\n");
         return 3;
     }
     std::fprintf(estimate, "timestamp,px,py,pz,qx,qy,qz,qw,features,clones\n");
-    // Ground truth here is Leica position-only (no orientation); qx..qw are
-    // written as an identity placeholder so the CSV schema matches the
-    // KAIST runner's (evaluate_trajectory.py only reads px,py,pz).
-    std::fprintf(truth, "timestamp,px,py,pz,qx,qy,qz,qw\n");
     std::fprintf(timing, "timestamp,tracking_ms,estimator_ms,total_ms,observations\n");
 
     ArenaAllocator global_arena(MiB(96));
@@ -71,9 +67,21 @@ int main(int argc, char** argv) {
         global_arena.allocate(sizeof(core::Feature) * core::TRACKER_MAX_FEATURES * 2U, alignof(core::Feature)));
     if (!vio || !tracker || !image_storage || !observations) return 4;
 
-    const msckf::VioManagerOptions options = make_euroc_options();
+    const msckf::VioManagerOptions options = make_mid_altitude_options();
     msckf::init_vio_manager(*vio, options);
     core::TrackerOptions tracker_options;
+    // TESTED num_features 250 (+min_px_dist=8), 250 alone, and 220 (all
+    // mirroring VINS-Fusion's max_cnt 150->300 which improved ITS ATE
+    // 13.03->11.69m): every variant collapsed tri_accept/ANCHOR ok on
+    // 40_4.bag, even after fixing a real, independent gap in
+    // core/tracker.cpp (fresh stereo seed matches had no epipolar
+    // verification, unlike temporal tracks -- fixed regardless, see
+    // tracker.cpp) -- that fix did NOT rescue num_features=220 either
+    // (tri_accept 2920->2395, still collapsed), so the failure isn't stereo
+    // mismatch, it's something in temporal drift/corner quality at this
+    // altitude. Reverted to the proven default; not chasing this further on
+    // 40_4.bag specifically before checking whether it's even the
+    // representative sequence (the paper's own best number was 60m/4m/s).
     if (!core::init_tracker(*tracker, tracker_options, options.cam_models, 2,
                             image_storage, core::tracker_image_storage_bytes(kImageWidth, kImageHeight))) return 5;
     cv::setNumThreads(4);
@@ -86,7 +94,9 @@ int main(int argc, char** argv) {
     sensor_msgs::ImageConstPtr right;
     double first_timestamp = -1.0;
     double newest_imu_time = -1.0;
-    // Stereo pairs waiting for the IMU to reach them. Never dropped.
+    // Stereo pairs waiting for the IMU to reach them. Never dropped -- see
+    // vio_rosbag_runner_euroc.cpp's comment on the same pattern; holding IMU
+    // back by 5 ms cost that runner 0.11 m -> 9.2 m on EuRoC.
     std::deque<std::pair<sensor_msgs::ImageConstPtr, sensor_msgs::ImageConstPtr>> pending;
     std::uint64_t frames = 0;
     double tracking_sum = 0.0;
@@ -107,11 +117,6 @@ int main(int argc, char** argv) {
             data.am << imu->linear_acceleration.x, imu->linear_acceleration.y, imu->linear_acceleration.z;
             msckf::feed_measurement_imu(*vio, data);
             newest_imu_time = std::max(newest_imu_time, data.timestamp);
-        } else if (topic == kGroundTruthTopic) {
-            const geometry_msgs::PointStampedConstPtr point = message.instantiate<geometry_msgs::PointStamped>();
-            if (point) std::fprintf(truth, "%.9f,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f\n",
-                point->header.stamp.toSec(), point->point.x, point->point.y, point->point.z,
-                0.0, 0.0, 0.0, 1.0);
         } else if (topic == kLeftTopic) {
             left = message.instantiate<sensor_msgs::Image>();
         } else if (topic == kRightTopic) {
@@ -120,7 +125,6 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        // Form the stereo pair, then QUEUE it -- do not process it here.
         if (left && right) {
             const double delta = stamp(left) - stamp(right);
             if (std::abs(delta) > 0.003) {
@@ -132,18 +136,6 @@ int main(int argc, char** argv) {
             }
         }
 
-        // Drain every queued pair the IMU has now passed. Bag order is RECEIVE
-        // order, so an image routinely arrives before the IMU samples that span
-        // it; DOD propagates with whatever is buffered, and updating on short
-        // propagation is catastrophic (holding the IMU back by 5 ms takes MH_01
-        // from 0.11 m to 9.2 m). Official OpenVINS queues camera messages for
-        // exactly this reason.
-        //
-        // The queue is the point. An earlier version of this held the pair in
-        // `left`/`right` and skipped processing until the IMU caught up -- but
-        // the next image message then OVERWROTE the waiting pair, silently
-        // dropping frames. That cost KAIST circle.bag 0.666 -> 60 m ATE (2456
-        // of 3600 frames survived). Nothing may be dropped.
         while (!pending.empty() &&
                0.5 * (stamp(pending.front().first) + stamp(pending.front().second)) <= newest_imu_time) {
             const sensor_msgs::ImageConstPtr pair_left = pending.front().first;
@@ -183,7 +175,6 @@ int main(int argc, char** argv) {
 
     bag.close();
     std::fclose(estimate);
-    std::fclose(truth);
     std::fclose(timing);
     std::fprintf(stderr, "complete frames=%llu initialized=%d tracking_mean_ms=%.6f estimator_mean_ms=%.6f\n",
         static_cast<unsigned long long>(frames), int(vio->is_initialized),
@@ -201,8 +192,6 @@ int main(int argc, char** argv) {
                  "[DB] full_refusals=%ld db_count=%zu slam_features=%d max_meas=%ld meas_overflow=%ld\n",
                  core::db_full_refusals, vio->db.count, vio->state.num_slam_features,
                  core::dbg_max_meas, core::feat_meas_overflow);
-    // Every one of these is data the pipeline threw away. All zero is the
-    // expected result on a healthy bag; nonzero says which bound is binding.
     std::fprintf(stderr,
                  "[DROP] imu_evictions=%ld imu_stale=%ld imu_window_trunc=%ld unpropagated_frames=%ld\n",
                  msckf::imu_buffer_evictions, msckf::imu_stale_drops,
@@ -226,9 +215,9 @@ int main(int argc, char** argv) {
     for (int i = 2; i < 16; ++i)
         std::fprintf(stderr, "%d:(%ld/%ld) ", i, core::tri_accept_hist[i], core::tri_cond_hist[i]);
     std::fprintf(stderr, "\n");
-    std::fprintf(stderr, "[EPI] computed=%ld no_baseline=%ld hist(0.00-1.00,20 bins): ",
-                 core::epi_computed, core::epi_no_baseline);
-    for (int i = 0; i < 20; ++i) std::fprintf(stderr, "%ld ", core::epi_score_hist[i]);
+    std::fprintf(stderr, "[TRI] depth_hist(5m bins, 0-100m) mean=%.2fm: ",
+                 core::tri_accept ? core::tri_depth_sum / (double)core::tri_accept : 0.0);
+    for (int i = 0; i < 20; ++i) std::fprintf(stderr, "%ld ", core::tri_depth_hist[i]);
     std::fprintf(stderr, "\n");
     return vio->is_initialized ? 0 : 6;
 }

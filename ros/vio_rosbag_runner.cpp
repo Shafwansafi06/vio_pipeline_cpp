@@ -503,6 +503,10 @@ const double camera_timestamp = stamp(pair_left);
         "[DROP] imu_evictions=%ld imu_stale=%ld imu_window_trunc=%ld unpropagated_frames=%ld\n",
         msckf::imu_buffer_evictions, msckf::imu_stale_drops,
         msckf::imu_window_truncations, msckf::frame_unpropagated_drops);
+    std::fprintf(stderr, "[EPI] computed=%ld no_baseline=%ld hist(0.00-1.00,20 bins): ",
+                 core::epi_computed, core::epi_no_baseline);
+    for (int i = 0; i < 20; ++i) std::fprintf(stderr, "%ld ", core::epi_score_hist[i]);
+    std::fprintf(stderr, "\n");
     std::fprintf(stderr, "complete frames=%llu initialized=%d tracking_mean_ms=%.6f estimator_mean_ms=%.6f\n",
         static_cast<unsigned long long>(frames), int(vio->is_initialized),
         frames ? tracking_sum / double(frames) : 0.0, frames ? estimator_sum / double(frames) : 0.0);

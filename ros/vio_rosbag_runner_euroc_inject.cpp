@@ -401,5 +401,9 @@ int main(int argc, char** argv) {
     for (int i = 2; i < 16; ++i)
         std::fprintf(stderr, "%d:(%ld/%ld) ", i, core::tri_accept_hist[i], core::tri_cond_hist[i]);
     std::fprintf(stderr, "\n");
+    std::fprintf(stderr, "[EPI] computed=%ld no_baseline=%ld hist(0.00-1.00,20 bins): ",
+                 core::epi_computed, core::epi_no_baseline);
+    for (int i = 0; i < 20; ++i) std::fprintf(stderr, "%ld ", core::epi_score_hist[i]);
+    std::fprintf(stderr, "\n");
     return vio->is_initialized ? 0 : 6;
 }

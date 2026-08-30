@@ -4,6 +4,7 @@
 #include <cmath>
 #include <algorithm>
 #include <iostream>
+#include <limits>
 
 namespace core {
 
@@ -22,9 +23,21 @@ long tri_reject_cond_meas = 0;
 long tri_accept_meas = 0;
 long tri_cond_hist[32] = {0};
 long tri_accept_hist[32] = {0};
+long tri_depth_hist[20] = {0};
+double tri_depth_sum = 0.0;
+long epi_computed = 0;
+long epi_no_baseline = 0;
+long epi_score_hist[20] = {0};
 long gn_reject_dist = 0;
 long gn_reject_baseline = 0;
 long gn_accept = 0;
+// parallax_noise_scale() accounting. Every early-out has its own counter so a
+// silently saturated weight cannot hide behind the mean.
+long pnw_computed = 0;
+long pnw_no_depth = 0;
+long pnw_no_baseline = 0;
+double pnw_scale_sum = 0.0;
+double pnw_scale_max = 0.0;
 
 // Official iterates features' per-camera measurement lists through an
 // unordered_map<size_t, ...> keyed by camera id. With ids inserted 0 then 1,
@@ -42,6 +55,125 @@ const ClonePose* find_clone_pose(const ClonesCamera& clones, int cam_id, double 
         }
     }
     return nullptr;
+}
+
+double epipolar_consistency_score(const Feature& feat, const ClonesCamera& clones) {
+    int oldest_idx = -1, newest_idx = -1;
+    double oldest_ts = std::numeric_limits<double>::infinity();
+    double newest_ts = -std::numeric_limits<double>::infinity();
+    for (int m = 0; m < feat.num_measurements; ++m) {
+        if (feat.measurements[m].cam_id != 0) continue;
+        const double ts = feat.measurements[m].timestamp;
+        if (ts < oldest_ts) { oldest_ts = ts; oldest_idx = m; }
+        if (ts > newest_ts) { newest_ts = ts; newest_idx = m; }
+    }
+    if (oldest_idx < 0 || newest_idx < 0 || oldest_idx == newest_idx) return -1.0;
+
+    const ClonePose* pose_i = find_clone_pose(clones, 0, oldest_ts);
+    const ClonePose* pose_j = find_clone_pose(clones, 0, newest_ts);
+    if (pose_i == nullptr || pose_j == nullptr) return -1.0;
+
+    Eigen::Vector3d bi(feat.measurements[oldest_idx].uv_norm[0], feat.measurements[oldest_idx].uv_norm[1], 1.0);
+    Eigen::Vector3d bj(feat.measurements[newest_idx].uv_norm[0], feat.measurements[newest_idx].uv_norm[1], 1.0);
+    bi.normalize();
+    bj.normalize();
+
+    // Bearings rotated camera -> global. ClonesCamera::poses already stores
+    // GLOBAL camera poses with extrinsics folded in, so unlike the
+    // featureless initializer's I0-frame version of this identity, there is
+    // no separate IMU-frame step: pose->R is R_GtoC directly.
+    const Eigen::Vector3d b_i_G = pose_i->R.transpose() * bi;
+    const Eigen::Vector3d b_j_G = pose_j->R.transpose() * bj;
+
+    const Eigen::Vector3d n = b_i_G.cross(b_j_G);
+    const double n_norm = n.norm();
+    if (n_norm < 1e-9) { ++epi_no_baseline; return -1.0; }  // parallel bearings: undefined plane
+    const Eigen::Vector3d n_hat = n / n_norm;
+
+    const Eigen::Vector3d t = pose_j->p - pose_i->p;
+    const double t_norm = t.norm();
+    if (t_norm < 1e-9) { ++epi_no_baseline; return -1.0; }  // clones effectively co-located
+    const Eigen::Vector3d t_hat = t / t_norm;
+
+    const double score = std::abs(n_hat.dot(t_hat));
+    ++epi_computed;
+    int bucket = int(score * 20.0);
+    if (bucket < 0) bucket = 0;
+    if (bucket > 19) bucket = 19;
+    ++epi_score_hist[bucket];
+    return score;
+}
+
+// Parallax-limited measurement noise scale (see feature.hpp for the model).
+//
+// Derivation. A stereo pair with baseline b and focal length f recovers depth
+// as Z = f*b/d, so a disparity error sigma_d propagates to
+//
+//     sigma_Z = Z^2 * sigma_d / (f*b).                                    (1)
+//
+// That is the Z^2 growth that makes high-altitude stereo weak. On its own it
+// is NOT a reason to inflate R: re-projecting sigma_Z into a clone displaced
+// by a translational baseline B gives a pixel shift f*B*sigma_Z/Z^2 =
+// B*sigma_d/b, in which Z cancels. The filter already sees that through the
+// Jacobians. What the filter does NOT see is that (1) is a first-order
+// propagation, and the triangulation it linearises about is only trustworthy
+// while the depth-to-parallax ratio stays small. The quantity that actually
+// degrades is
+//
+//     rho = Z / B,       B = widest translational baseline that saw the feature,
+//
+// and the extra pixel-domain uncertainty from linearising at a badly
+// conditioned triangulation is modelled here as proportional to rho:
+//
+//     sigma_eff^2 = sigma_pix^2 * (1 + (lambda*rho)^2).                   (2)
+//
+// lambda is dimensionless and is the only tuned quantity; lambda = 0 disables
+// the model exactly (the returned 1.0 makes the caller's division a division
+// by 1.0, which is exact in IEEE-754, so trajectories stay bit-identical).
+// The result is clamped to max_scale so a near-zero baseline cannot produce an
+// unbounded weight.
+//
+// NOTE the model is written in Z/B, not in altitude. An altitude threshold
+// would be a constant tuned on one dataset (CLAUDE.md, rule 8.5); Z/B is the
+// geometry itself and needs no per-dataset value.
+double parallax_noise_scale(const Feature& feat, const ClonesCamera& clones,
+                            double lambda, double max_scale) {
+    if (lambda <= 0.0) return 1.0;
+
+    // Depth of the linearisation point in its anchor camera. p_FinA is written
+    // by single_triangulation/single_gaussnewton immediately before every
+    // caller of this function.
+    const double Z = feat.p_FinA.z();
+    if (!(Z > 0.0)) { ++pnw_no_depth; return max_scale; }
+
+    // Widest translational baseline among the clones that observed it. O(n^2)
+    // over at most FEATURE_MAX_MEASUREMENTS rows with the clone lookup hoisted
+    // out; the alternative (an axis-aligned extent) underestimates the spread.
+    Eigen::Vector3d pos[FEATURE_MAX_MEASUREMENTS];
+    int n_pos = 0;
+    for (int m = 0; m < feat.num_measurements; ++m) {
+        const ClonePose* pose = find_clone_pose(clones, feat.measurements[m].cam_id,
+                                                feat.measurements[m].timestamp);
+        if (pose == nullptr) continue;
+        pos[n_pos++] = pose->p;
+    }
+    double B_sq = 0.0;
+    for (int i = 0; i < n_pos; ++i) {
+        for (int j = i + 1; j < n_pos; ++j) {
+            const double d_sq = (pos[i] - pos[j]).squaredNorm();
+            if (d_sq > B_sq) B_sq = d_sq;
+        }
+    }
+    if (!(B_sq > 0.0)) { ++pnw_no_baseline; return max_scale; }
+
+    const double rho_sq = (Z * Z) / B_sq;
+    double scale = 1.0 + lambda * lambda * rho_sq;
+    if (scale > max_scale) scale = max_scale;
+
+    ++pnw_computed;
+    pnw_scale_sum += scale;
+    if (scale > pnw_scale_max) pnw_scale_max = scale;
+    return scale;
 }
 
 int find_feature_index(const FeatureDatabase& db, int feat_id) {
@@ -338,7 +470,12 @@ bool single_triangulation(Feature& feat, const ClonesCamera& clones, const Featu
     ++tri_accept;
     tri_accept_meas += feat.num_measurements;
     if (feat.num_measurements < 32) ++tri_accept_hist[feat.num_measurements];
-    
+    {
+        int bucket = static_cast<int>(p_f[2] / 5.0);
+        tri_depth_hist[std::clamp(bucket, 0, 19)] += 1;
+        tri_depth_sum += p_f[2];
+    }
+
     feat.p_FinA = p_f;
     feat.p_FinG = R_GtoA.transpose() * p_f + p_AinG;
     return true;
