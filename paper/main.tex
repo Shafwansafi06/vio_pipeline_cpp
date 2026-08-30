@@ -126,9 +126,7 @@ update. We reimplemented SchurVINS's update in the same data-oriented layout
 (fixed-capacity buffers, no per-frame allocation) as an alternate MSCKF
 update path, gated behind a runtime flag and \emph{off by default}; every
 benchmark number in this paper uses the primary MSCKF/SLAM update path, not
-the SchurVINS path. Benchmarked head-to-head against the authors' own released
-\texttt{ov\_SchurVINS} fork, our primary pipeline is 1.97$\times$ faster
-end-to-end on identical data (Table~\ref{tab:ablation}, row 9).
+the SchurVINS path.
 
 \textbf{sqrtVINS} \cite{peng2025sqrtvins} contributes two ideas this
 pipeline uses directly and attributes precisely: a square-root-form EKF
@@ -267,6 +265,41 @@ configuration held fixed. Every number in Section~\ref{sec:results} outside
 the embedded preliminary result (Section~\ref{sec:embedded}, explicitly
 flagged) uses the rosbag-transport figure.
 
+\subsection{Toolchain confound}
+\label{sec:toolchain}
+Transport is not the only environmental variable an ATE figure silently
+carries. Building the identical estimator code from the identical commit
+against identical data, differing only in the toolchain (OpenCV 4.2.0 with
+g++ 9.4.0 in a pinned Docker container versus OpenCV 4.5.4 with g++ 11.4.0
+on the host), reproduces most EuRoC sequences within about 1\% but differs
+by 23\% on MH\_02 and 8\% on V1\_01 (Table~\ref{tab:toolchain}). The
+frontend is OpenCV's KLT tracker, so the library version is part of the
+reported result, and the divergence concentrates exactly where reviewers
+spot-check. We quote an environment with every ATE in this paper; an ATE
+quoted without its transport and toolchain cannot be reproduced.
+
+\begin{table}[t]
+\caption{Identical code and data, two toolchains (ATE RMSE, m;
+$\Delta$ relative to the container figure). Most
+sequences agree within a few percent; MH\_02 differs by 23\%.}
+\label{tab:toolchain}
+\centering
+\begin{tabular}{lrrr}
+\toprule
+Sequence & container & host & $\Delta$ \\
+\midrule
+MH\_01 & 0.1293 & 0.1282 & 1\% \\
+MH\_02 & 0.2080 & 0.1595 & 23\% \\
+MH\_03 & 0.2343 & 0.2234 & 5\% \\
+MH\_04 & 0.4267 & 0.4416 & 3\% \\
+MH\_05 & 0.3285 & 0.3115 & 5\% \\
+V1\_01 & 0.0545 & 0.0499 & 8\% \\
+V1\_02 & 0.0482 & 0.0553 & 15\% \\
+V1\_03 & 0.0550 & 0.0564 & 3\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
 \subsection{Datasets}
 Ten public sequences: EuRoC MH\_01--MH\_05 (machine hall) and V1\_01--V1\_03
 (vicon room), and two KAIST Complex Urban sequences (circle, infinity),
@@ -363,11 +396,7 @@ KAIST circle   & $15.688 \pm 0.070$ & $27.994 \pm 0.240$ & 1.78$\times$ \\
 
 Table~\ref{tab:speed} shows 1.78--2.10$\times$ end-to-end speedup with
 identical trajectories, at points where the accuracy and speed measurements
-were taken from the same build and the same run. Benchmarked separately
-against the authors' own released \texttt{ov\_SchurVINS} fork on MH\_01
-(static initialization, bag\_start~40, matching its own launch protocol),
-the reimplementation is 1.97$\times$ faster than \texttt{ov\_SchurVINS} and
-2.16$\times$ faster than stock OpenVINS on the same protocol.
+were taken from the same build and the same run.
 
 \subsection{Allocation profile}
 
@@ -400,7 +429,6 @@ addressed by this design.
 6 & DHAT-guided allocation cuts (3 sites) & 1{,}322{,}658$\rightarrow$825{,}790 blocks \\
 7 & Measurement compression + $\chi^2$ restructuring & MSCKF stage: 1.535$\rightarrow$1.000\,ms \\
 8 & $M_a$/covariance-update restructuring (first pass) & Per-frame: 7.40$\rightarrow$5.43\,ms \\
-9 & vs.\ authors' \texttt{ov\_SchurVINS} (own protocol) & 1.97$\times$ faster \\
 \bottomrule
 \end{tabular}
 \end{table*}
@@ -556,13 +584,16 @@ within 3\% of OpenVINS. A reader looking for a strict accuracy win should
 not find one here; we report Table~\ref{tab:ate} in full rather than a
 favorably selected subset.
 
-\textbf{SchurVINS support is built but unused.} The reimplementation
-includes a data-oriented SchurVINS update path (Section~\ref{sec:rules}'s
-constraints applied to \cite{fan2024schurvins}'s algorithm), gated behind a
-runtime flag that defaults off. No result in this paper uses it; it is
-reported (Table~\ref{tab:ablation}, row 9) purely as a second, independent
-speed comparison against a second reference implementation on the same
-data.
+\textbf{SchurVINS support is built but not benchmarked against the authors'
+fork.} The reimplementation includes a data-oriented SchurVINS update path
+(Section~\ref{sec:rules}'s constraints applied to \cite{fan2024schurvins}'s
+algorithm), gated behind a runtime flag that defaults off, and verified to
+run the full MH\_01 sequence to completion when enabled. No result in this
+paper uses it: an earlier speed comparison
+against the authors' own released \texttt{ov\_SchurVINS} fork was withdrawn
+because the fork as released aborts on MH\_01 in our environment (in both
+its serial and subscribe modes) and the build that produced the earlier
+comparison no longer exists. We do not quote a number we cannot reproduce.
 
 \textbf{Embedded validation is preliminary.} Section~\ref{sec:embedded}
 reports one sequence, one architecture, no allocation profile, and no
