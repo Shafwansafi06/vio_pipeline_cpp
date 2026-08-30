@@ -12,11 +12,54 @@ Format:
 - **Rule** — the generalisation, if there is one. Not every mistake has one.
 - **Reaches forward to** — which open tickets this can still bite.
 
-Newest at the top within each section. Last updated: 2026-08-30 (M-20, T-004).
+Newest at the top within each section. Last updated: 2026-08-30 (M-21/22, T-005).
 
 ---
 
 ## A. Process mistakes (the expensive ones)
+
+### M-21 — Clamping a knob to the value that breaks
+
+- **Believed:** `clones_IMU[20]`, `ClonesCamera::poses[2][20]` and
+  `clonetimes[20]` are all 20, so 20 is the safe maximum for
+  `max_clone_size`. Clamped the new `VIO_MAX_CLONES` knob there and wrote a
+  comment explaining the reasoning.
+- **True:** 20 is the one value that must never be used. Insertion stops at
+  `num_clones < 20`, while marginalisation fires on
+  `num_clones > max_clone_size` — so at 20 marginalisation is unreachable, the
+  window never slides, and the filter starves. 40_4, healthy at 11 and 15,
+  goes to ATE 94149 with 36 accepted triangulations. The run completes and
+  reports a trajectory; nothing warns.
+- **Cost:** one sweep run at a meaningless setting, and it would have been a
+  latent trap in a committed knob.
+- **Rule:** an array's capacity is not the same as the largest legal index for
+  a *consumer* of that array. Before clamping to a buffer size, find the
+  comparison that governs the loop — here `>` versus `<` two files apart — and
+  clamp to what that comparison needs.
+- **Second rule:** a config value that silently produces a plausible-looking
+  wrong answer is worse than one that crashes. `FEATURE_MAX_CLONES_SUPPORTED`
+  advertises 23; nothing enforces 19. That gap is the bug, and the clamp is
+  only a patch over it.
+- **Reaches forward to:** T-006, T-008 — both sweep configs, and any value
+  near a buffer bound deserves this check.
+
+### M-22 — A second tidy explanation, caught this time
+
+- **Believed:** the collapse past 15 clones is track survival — at 16 Hz and
+  4 m/s, features cannot live long enough to span a 17-clone window, so the
+  MSCKF starves. Physical, plausible, consistent with the accept counts.
+- **True:** the counters say the reverse. Going 11 -> 17 clones at 40 m,
+  `maxtrack` per frame **rises** 3.49 -> 10.09 — *more* features reach the end
+  of the window. What dies is SLAM promotion (`slam_update` 41.57 -> 0.99,
+  `slam_features` 4 -> 0) and marginalisation (`marginal` 9.74 -> 0.45).
+- **Cost:** none. M-19 was written two tickets ago about exactly this, and this
+  time the check ran before the claim was published.
+- **Rule:** the lesson from M-19 held once it was written down, which is the
+  argument for writing these down. One cheap counter query separated a
+  plausible story from the truth.
+- **Still open:** the mechanism is characterised, not explained. It is recorded
+  as unexplained rather than filled in with the nearest reasonable narrative.
+- **Reaches forward to:** any future attempt to lengthen the clone window.
 
 ### M-20 — Fixing the constant that was derivable, not the one that was dominant
 
@@ -329,3 +372,9 @@ let them rot here.
   pre-branch control tree.** The argument now has evidence behind it.
 - What configuration produced the withdrawn 0.1131 table is unknown. Closed as
   not worth chasing (T-013); the control-tree method does not depend on it.
+- `VIO_INIT_WINDOW` is inert on the featureless init path (byte-identical runs
+  at 4 s and 6 s). The `rec_cond` vs window table recorded in
+  `mid_altitude_options.hpp` does not reproduce through it. Needs a ticket.
+- The collapse past 15 clones kills SLAM promotion and marginalisation for
+  reasons not yet identified. Affects EuRoC configs too in principle; nothing
+  sets a window that long today.

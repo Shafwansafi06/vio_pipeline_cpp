@@ -19,7 +19,7 @@ this system):
    code. Do not retry it later from memory.
 4. Nothing lands without the accuracy gate (T-003) green.
 
-Last updated: 2026-08-30 (T-001..T-004, T-013 closed).
+Last updated: 2026-08-30 (T-001..T-005, T-013 closed).
 
 ---
 
@@ -36,7 +36,7 @@ Last updated: 2026-08-30 (T-001..T-004, T-013 closed).
 
 | ID | Title | Status | Depends on |
 |----|-------|--------|-----------|
-| T-005 | Triangulation conditioning + init at altitude | **critical path** | T-004 |
+| T-005 | Triangulation conditioning + init at altitude | **done — no constant fixes it** | — |
 | T-007 | FGI into tools/sweep.sh | todo | T-004 |
 | T-008 | Altitude-stratified baseline, lambda=0, 12 bags | todo | T-004, T-007 |
 | T-006 | Sweep VIO_PARALLAX_LAMBDA over the envelope | todo | T-002, T-008 |
@@ -255,26 +255,84 @@ swept, the model does not do the job it was written for.
 
 ## T-005 — Triangulation conditioning and init at altitude
 
-**Status:** critical path, reshaped by T-004. Was "sweep
-`VIO_INIT_MIN_REC_COND` on 60_4"; that is now the *second* of two levers, and
-probably not the bigger one.
+**Status:** done, 2026-08-30. **Conclusion: no constant in this pipeline
+rescues 60/80/100 m.** Three levers swept, 30+ runs. Two bugs found on the way,
+one of them serious.
 
-**Lever 1 — triangulation conditioning (new, and the larger effect).**
-`max_cond_number = 10000.0` rejects 64947 features on 80_4 against 13744 for
-`max_dist`. Sweep it upward on 60/80/100. Note the direction matters: a test at
-**3000** on 40_4 made ATE worse (13.06 vs 12.81) and is recorded in
-`mid_altitude_options.hpp`, so this is not "stricter is better" — 40 m may want
-strict and 100 m may want loose, which is itself the altitude story.
-Needs an env knob like `VIO_MAX_DIST`.
+### Lever 1 — `max_cond_number` (the one T-004 pointed at)
 
-**Lever 2 — init conditioning.** `VIO_INIT_MIN_REC_COND`, `VIO_INIT_WINDOW`,
-`VIO_INIT_NUM_POSE` are already wired. Measured `rec_cond`: 40_4 6.86e-05
-(gravity error 0.94 deg) against 60_4 0.00337 (6.11 deg), 80_4 0.000946
-(1.41 deg), 100_4 0.00417 (1.93 deg). 60_4 is the worst-conditioned of the
-four and is the one that aborts.
+| altitude | 1e4 | 1e5 | 1e6 | 1e7 |
+|---|---|---|---|---|
+| 40 | **12.814** | 14.299 | 16.855 | 16.855 |
+| 60 | 1368 (abort) | 134421 | 134421 | 134421 |
+| 80 | **56303** | 75686 | 75686 | 75686 |
+| 100 | 94897 | 1935 | 2955 | **1916** |
 
-**Exit condition:** a table of `max_cond_number` x altitude x ATE, and the same
-for the init knobs, with 60_4 either converging or a stated reason why not.
+Loosening helps 100 m by 50x, hurts 40 m and 80 m, rescues nothing. And the
+reason it plateaus is instructive: at 1e7 on 60 m the rejects have simply moved
+house — `reject_cond` 6, but `reject_mindist` 44804 and `reject_maxdist` 42888.
+The triangulations were always degenerate, landing at ~0 or ~infinity; the
+conditioning gate was labelling them, not causing them. At 40 m,
+`reject_maxdist` is 0.
+
+### Lever 2 — initialisation
+
+`VIO_INIT_MIN_REC_COND` works: 0.01 and 0.05 both reject 60_4's bad solve and
+stop the abort. They do not stop the divergence (66623 and 139302). `rec_cond`
+is `smin/smax`, so higher is better-conditioned, and 60_4's 0.00337 is
+*better* than EuRoC's 1.6e-4 while diverging — the conditioning number is not
+what separates these regimes.
+
+`VIO_INIT_WINDOW` is **inert** on this dataset — see the bugs below.
+
+### Lever 3 — temporal baseline (`VIO_MAX_CLONES`)
+
+The stereo rig is 0.30 m against 40-100 m of depth (Z/B of 130-330), so
+temporal baseline is the only parallax available. Lengthening the window helps
+once and then falls off a cliff:
+
+| altitude | 11 | 15 | 17 | 19 |
+|---|---|---|---|---|
+| 40 | **12.814** | 12.810 | 39117 | 95527 |
+| 60 | 1368 | 206549 | — | 161223 |
+| 80 | 56303 | **6975** | 60716 | 73191 |
+| 100 | 94897 | 125921 | 157775 | 111138 |
+
+80 m improves 8x at 15 clones. Beyond 15 **every** sequence collapses,
+including 40 m, which is healthy at 11 and 15. That is a code coupling, not
+physics.
+
+### Bug A (serious, fixed) — `max_clone_size = 20` silently starves the filter
+
+`state_helper.cpp:430` stops inserting at `num_clones < 20`; marginalisation
+fires on `num_clones > max_clone_size`. At 20 that condition is unreachable, so
+the window never slides. 40_4 goes from ATE 12.810 to 94149.750, accepted
+triangulations 29433 -> 36, `meas_overflow` 45428 — and the run completes
+normally and reports a trajectory. No warning. Clamp fixed to 19, invariant
+documented at the declaration. `FEATURE_MAX_CLONES_SUPPORTED` claims 23, which
+is misleading given the hard 20 in `state_helper`.
+
+### Bug B (open) — `VIO_INIT_WINDOW` does nothing on the featureless path
+
+`w4` and `w6` produce **byte-identical** output with identical
+`rec_cond=0.00336631`. `init_featureless` uses `init_dyn_num_pose`, not
+`init_window_time`, and logs `pairs=3 times=3` regardless. The claim recorded
+in `mid_altitude_options.hpp` — "rec_cond vs window on 60_4: 0.0034 (3 frames),
+0.0068 (4 s), 0.065 (6 s)" — does not reproduce through this knob. Either the
+knob is not wired to the path this dataset takes, or that measurement came from
+somewhere else. **Not fixed; needs its own ticket.**
+
+### What collapses past 15 clones — characterised, not explained
+
+At 40 m, going 11 -> 17 clones: `maxtrack` per frame **rises** 3.49 -> 10.09,
+while `marginal` falls 9.74 -> 0.45, `slam_update` falls 41.57 -> 0.99 and
+`slam_features` reaches 0. My first explanation was that tracks cannot survive
+a longer window; the counters say the opposite — more features reach max track,
+and it is SLAM promotion and marginalisation that die. Mechanism not
+identified. Recorded rather than guessed.
+
+**Exit:** the altitude regime is not reachable by tuning. T-006 is the last
+in-branch candidate, and its prediction from T-004 is still standing.
 
 ---
 
