@@ -19,7 +19,7 @@ this system):
    code. Do not retry it later from memory.
 4. Nothing lands without the accuracy gate (T-003) green.
 
-Last updated: 2026-08-30 (T-001, T-002, T-003, T-013 closed).
+Last updated: 2026-08-30 (T-001..T-004, T-013 closed).
 
 ---
 
@@ -30,13 +30,13 @@ Last updated: 2026-08-30 (T-001, T-002, T-003, T-013 closed).
 | T-001 | Commit the FGI harness + diagnostics | **done** 862b3b8 | — |
 | T-002 | Commit the whitening wiring (lambda=0) | **done** 15b0860 | — |
 | T-003 | Accuracy gate: 10-sequence sweep on moonlab | **done** PASS | — |
-| T-004 | Does 60_4 converge with max_dist=200? | **next** | T-005, T-006, T-008 |
+| T-004 | Does 60_4 converge with max_dist=200? | **done — NO** | — |
 
 ## Next
 
 | ID | Title | Status | Depends on |
 |----|-------|--------|-----------|
-| T-005 | Sweep VIO_INIT_MIN_REC_COND on 60_4 | todo | T-004 |
+| T-005 | Triangulation conditioning + init at altitude | **critical path** | T-004 |
 | T-007 | FGI into tools/sweep.sh | todo | T-004 |
 | T-008 | Altitude-stratified baseline, lambda=0, 12 bags | todo | T-004, T-007 |
 | T-006 | Sweep VIO_PARALLAX_LAMBDA over the envelope | todo | T-002, T-008 |
@@ -199,43 +199,82 @@ depend on the answer.
 
 ## T-004 — Does 60_4 converge with max_dist=200?
 
-**Status:** todo. **This is the gating experiment for the entire ICRA line.**
+**Status:** done, 2026-08-30. **Answer: no.** The fix is correct and necessary;
+it is nowhere near sufficient, and the diagnostics point at a different gate
+than the ticket assumed.
 
-60_4.bag diverges from t=0. Two independent causes are on record:
-1. `max_dist=75.0` (EuRoC indoor constant) sits below the 80.3 m slant range a
-   nadir camera sees at 60 m altitude -> `reject_maxdist=43579`. Already
-   derived from FOV geometry and fixed to 200.0 in the runner. **Untested.**
-2. The featureless `[v,g]` solve is badly conditioned: `rec_cond 0.0034` vs
-   40_4's 6.9e-05, gravity-vs-accel 6.1 deg vs 0.94. Levers are wired but
-   unswept (that is T-005).
+Run in `ros_container_v2`, `vio_rosbag_runner_mid_altitude`, with the new
+`VIO_MAX_DIST` knob providing the control.
 
-**Exit condition:** one run of 60_4.bag with the committed runner. Record ATE,
-`reject_maxdist`, `rec_cond`, and the `tri_depth_hist` buckets. Two outcomes,
-both useful: it converges (cause 1 was the whole story, T-005 may be
-unnecessary) or it still diverges (cause 2 is real and T-005 becomes the
-critical path).
+| run | ATE (m) | est path | gt path | outcome |
+|---|---|---|---|---|
+| 40_4 md75 | 12.814 | 921.8 | 718.7 | converges |
+| 40_4 md200 | 12.814 | 921.8 | 718.7 | **byte-identical to md75** |
+| 60_4 md75 | 137208 | 461006 | 975.3 | diverges, runs to end |
+| 60_4 md200 | 1367.7 | 5567 | 111.7 | **aborts** ~frame 800 |
+| 80_4 md200 | 56303 | 187345 | 1015.0 | diverges |
+| 100_4 md200 | 94897 | 316338 | 1056.2 | diverges |
 
-**Do not start T-006 before this closes.** lambda is untestable while the
-envelope diverges for a reason unrelated to lambda.
+**The FOV derivation is confirmed exactly where it predicted.** At 40 m the
+slant range is 53.5 m, below both constants, so `max_dist` cannot matter — and
+md75 and md200 produce identical output. The derivation was right about its own
+scope. 40_4's ATE of 12.814 also reproduces the recorded 12.81.
+
+**60_4 does not converge; it fails differently.** With md75 it drifts to 461 km
+of path. With md200 it dies at
+`EKFPropagation() - diagonal at 101 is -3.86858e-10`, the negative-covariance
+abort, after ~800 frames. Raising the cap admitted deep features that then
+destabilised the filter. Both runs share an identical initialisation
+(`rec_cond=0.00336631`, `gravity-vs-accel=6.106 deg`), which confirms
+`max_dist` does not touch init — so cause 2 from the ticket is real and
+untreated.
+
+**The unexpected result, and the reason T-005 changes shape.** 80_4's
+triangulation counters:
+
+```
+[TRI] accept=3857 reject_cond=64947 reject_mindist=9919 reject_maxdist=13744
+[DB]  slam_features=0        (40_4: 4)
+[CLS] slam_update=1.16/frame (40_4: 41.57)
+```
+
+`reject_cond` is **4.7x larger than `reject_maxdist`**. The dominant gate at
+altitude is the triangulation conditioning number, not the distance cap.
+`skip_tri` is 98.6% at 80 m and 97.7% at 100 m, against 64% at 40 m, and the
+filter reaches zero SLAM features. It is not diverging because it mis-weights
+features; it is diverging because it has almost none.
+
+**Prediction for T-006, recorded now so it can be wrong.** 60_4's md200 failure
+is a covariance blow-up caused by admitting deep, badly-conditioned
+triangulations at full confidence. That is precisely the case
+`parallax_noise_scale` exists for. If the model works at all, lambda > 0 should
+make md200 survive where md75 could not. If 60_4 still aborts with lambda
+swept, the model does not do the job it was written for.
 
 ---
 
-## T-005 — Sweep VIO_INIT_MIN_REC_COND on 60_4
+## T-005 — Triangulation conditioning and init at altitude
 
-**Status:** todo. Blocked on T-004.
+**Status:** critical path, reshaped by T-004. Was "sweep
+`VIO_INIT_MIN_REC_COND` on 60_4"; that is now the *second* of two levers, and
+probably not the bigger one.
 
-Knobs already wired: `VIO_INIT_MIN_REC_COND`, `VIO_INIT_WINDOW`,
-`VIO_INIT_NUM_POSE`. Measured `rec_cond` vs window on 60_4: 0.0034 (3 frames),
-0.0068 (4 s), 0.065 (6 s). EuRoC's healthy solves sit at 1.6e-4 .. 2.3e-4, so a
-threshold between the regimes should reject the bad early solves and let the
-pre-init database grow.
+**Lever 1 — triangulation conditioning (new, and the larger effect).**
+`max_cond_number = 10000.0` rejects 64947 features on 80_4 against 13744 for
+`max_dist`. Sweep it upward on 60/80/100. Note the direction matters: a test at
+**3000** on 40_4 made ATE worse (13.06 vs 12.81) and is recorded in
+`mid_altitude_options.hpp`, so this is not "stricter is better" — 40 m may want
+strict and 100 m may want loose, which is itself the altitude story.
+Needs an env knob like `VIO_MAX_DIST`.
 
-**Exit condition:** a table of `min_rec_cond` x ATE on 60_4 and 40_4, plus
-confirmation that EuRoC stays bit-identical (default 0 = off).
+**Lever 2 — init conditioning.** `VIO_INIT_MIN_REC_COND`, `VIO_INIT_WINDOW`,
+`VIO_INIT_NUM_POSE` are already wired. Measured `rec_cond`: 40_4 6.86e-05
+(gravity error 0.94 deg) against 60_4 0.00337 (6.11 deg), 80_4 0.000946
+(1.41 deg), 100_4 0.00417 (1.93 deg). 60_4 is the worst-conditioned of the
+four and is the one that aborts.
 
-**Prior art, do not repeat:** `init_imu_thresh` 1.5 -> 0.5 was tested and is
-byte-identical here (the static initializer never fires on this dataset).
-Initialising earlier was tested on KAIST and was 24% *worse*.
+**Exit condition:** a table of `max_cond_number` x altitude x ATE, and the same
+for the init knobs, with 60_4 either converging or a stated reason why not.
 
 ---
 

@@ -12,11 +12,43 @@ Format:
 - **Rule** — the generalisation, if there is one. Not every mistake has one.
 - **Reaches forward to** — which open tickets this can still bite.
 
-Newest at the top within each section. Last updated: 2026-08-30 (M-19, T-013).
+Newest at the top within each section. Last updated: 2026-08-30 (M-20, T-004).
 
 ---
 
 ## A. Process mistakes (the expensive ones)
+
+### M-20 — Fixing the constant that was derivable, not the one that was dominant
+
+- **Believed:** `max_dist = 75.0` was the cause of 60_4.bag's divergence. The
+  evidence was good — a clean FOV derivation, and `reject_maxdist = 43579` on
+  60_4 against 0 on 40_4, exactly the sequence boundary between working and
+  broken.
+- **True:** raising it to 200 does not make 60_4 converge. It changes the
+  failure from a 461 km drift into a negative-covariance abort at ~frame 800.
+  And the counters that were never printed side by side show why: on 80_4,
+  `reject_cond = 64947` against `reject_maxdist = 13744`. The distance cap was
+  never the dominant gate at altitude; triangulation *conditioning* is, by
+  4.7x. The filter reaches zero SLAM features and diverges for lack of
+  measurements, not for lack of range.
+- **Cost:** none wasted — the `max_dist` fix is correct within its scope and
+  had to happen. The cost was in the plan: T-005 was scoped around
+  initialisation for four days when the larger lever was a triangulation
+  constant nobody had ranked.
+- **Rule:** **rank the reject counters before choosing which one to fix.** One
+  counter that is large and has a satisfying explanation is not evidence that
+  it is the largest. This is the DHAT lesson from CLAUDE.md in a new place:
+  ranking by blocks and by bytes pointed at different defects, and ranking
+  rejections by cause does the same.
+- **Second rule:** a constant that can be *derived* is attractive to fix
+  because the fix feels principled. That is a bias toward the tractable, not
+  toward the dominant. `max_cond_number = 10000` has no derivation available,
+  which is probably why it went unexamined.
+- **What the derivation did earn:** at 40 m, md75 and md200 produce
+  byte-identical output, exactly as the slant-range argument predicted. The
+  derivation was right about its scope. It was the diagnosis of *the* cause
+  that overreached.
+- **Reaches forward to:** T-005 (reshaped around this), T-006, T-008.
 
 ### M-19 — A tidy explanation, accepted one check too early
 
@@ -278,6 +310,13 @@ let them rot here.
 - `max_msckf_in_update=75` in the FGI config is EuRoC's value, marked
   PLACEHOLDER, unmeasured at 16 Hz stereo and 40-100 m depth. Per M-14 assume
   it is wrong.
+- Only 4 of the dataset's 12 bags are on moonlab: 40/60/80/100 m, all at
+  4 m/s. The altitude axis is testable; the speed axis is not, and no claim
+  about speed can be made from what is downloaded.
+- 60_4's md200 abort is a covariance blow-up from admitting deep,
+  badly-conditioned triangulations at full confidence — the exact case
+  `parallax_noise_scale` was written for. Recorded as T-006's prediction so it
+  can be falsified rather than confirmed after the fact.
 - `parallax_noise_max=100.0` is an unjustified cap. If T-006 ever hits the
   clamp, the cap is doing the tuning and the result is about the cap, not the
   model. Log clamp hits before reading that sweep.
