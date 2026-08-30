@@ -19,11 +19,31 @@ this system):
    code. Do not retry it later from memory.
 4. Nothing lands without the accuracy gate (T-003) green.
 
-Last updated: 2026-08-30 (T-001..T-006, T-013 closed).
+Last updated: 2026-08-30. Altitude line parked after T-006; the speed paper is the active work.
 
 ---
 
-## Now
+## Now — the speed paper (ICRA)
+
+**Spine chosen: systems paper.** "The fastest and most predictable MSCKF
+implementation, validated on the hardware where layout actually matters."
+Rationale and what it costs us in `docs/paper_spine.md`.
+
+| ID | Title | Status | Cost |
+|----|-------|--------|------|
+| P-01 | Predictability: p99, jitter, latency CDF, RSS | todo | ~free, data on disk |
+| P-05 | Toolchain confound (already measured) | todo | free, T-013 output |
+| P-02 | Close the embedded loop on Orin Nano | todo | **gating; needs device** |
+| P-03 | DOD-Schur vs ov_SchurVINS head-to-head | todo | medium |
+| P-04 | Transport confound, full 10x2x2 matrix | todo | medium |
+| P-06 | Convert speed headroom into accuracy | todo | tight for 2 weeks |
+| P-07 | Artifact: docker + scripts + CSVs | todo | small |
+
+Two-week ordering: P-01 and P-05 first (both nearly free and both directly
+support the thesis), then P-02 as soon as the device is reachable, then P-03.
+P-04 and P-06 only if those land.
+
+## Parked — altitude line
 
 | ID | Title | Status | Blocks |
 |----|-------|--------|--------|
@@ -37,18 +57,129 @@ Last updated: 2026-08-30 (T-001..T-006, T-013 closed).
 | ID | Title | Status | Depends on |
 |----|-------|--------|-----------|
 | T-005 | Triangulation conditioning + init at altitude | **done — no constant fixes it** | — |
-| T-007 | FGI into tools/sweep.sh | todo | T-004 |
-| T-008 | Altitude-stratified baseline, lambda=0, 12 bags | todo | T-004, T-007 |
+| T-007 | FGI into tools/sweep.sh | **parked** | — |
+| T-008 | Altitude-stratified baseline | **parked** | — |
 | T-006 | Sweep VIO_PARALLAX_LAMBDA over the envelope | **done — model refuted** | — |
 
 ## Later
 
 | ID | Title | Status | Depends on |
 |----|-------|--------|-----------|
-| T-009 | Decide the ICRA claim from the data | todo | T-006 |
-| T-010 | ICRA paper draft | todo | T-009 |
+| T-009 | Decide the altitude claim | **parked — claim refuted by T-006** | — |
+| T-010 | Altitude paper draft | **parked** | — |
 | T-011 | Refresh docs/icra2027_plan.md | todo | — |
 | T-012 | Land the JOSS author-name fix | todo | — |
+
+---
+
+## P-01 — Predictability: p99, jitter, latency CDF, RSS
+
+**Status:** todo. **Nearly free — the data already exists.**
+
+Every run this pipeline has ever done writes `*_timing.csv` with
+`timestamp,tracking_ms,estimator_ms,total_ms,observations`, ~5k rows per
+sequence. p99 frame latency, jitter (p99-p50), and a full latency CDF are a
+pandas script away, for DOD and for OpenVINS, on every sequence already run.
+No new experiments.
+
+**Why this is the highest-value cheap ticket.** The paper's thesis is bounded,
+predictable per-frame state, and it currently reports only mean throughput —
+the claim's own metric is missing. Mean throughput is also the metric a
+reviewer trusts least, because it hides exactly the tail a real-time system
+cares about.
+
+**Missing piece:** max RSS. Needs `/usr/bin/time -v` around each run, or
+`getrusage` at shutdown next to the existing counters. One line, then re-run.
+
+**Exit condition:** a table of p50/p99/max frame latency and max RSS for both
+estimators on all ten sequences, plus one CDF figure. If DOD's p99 advantage
+exceeds its mean advantage, that is the paper's strongest single number and it
+belongs in the abstract.
+
+---
+
+## P-05 — The toolchain confound
+
+**Status:** todo. **Already measured, costs nothing to write up.**
+
+T-013 established it by accident: identical code, identical data, same day,
+differing only in OpenCV 4.2.0 / g++ 9.4.0 versus 4.5.4 / g++ 11.4.0.
+
+| | MH_01 | MH_02 | MH_03 | MH_04 | MH_05 | V1_01 | V1_02 | V1_03 |
+|---|---|---|---|---|---|---|---|---|
+| container | 0.1293 | 0.2080 | 0.2343 | 0.4267 | 0.3285 | 0.0545 | 0.0482 | 0.0550 |
+| host | 0.1282 | 0.1595 | 0.2234 | 0.4416 | 0.3115 | 0.0499 | 0.0553 | 0.0564 |
+
+Mostly within 1%, but **23% on MH_02** and 8% on V1_01. The KLT frontend is
+OpenCV's, so the library version is part of the reported result.
+
+**Why it matters more than it looks.** It is a second confound of the same
+species as the transport confound, it lands on the same sequences reviewers
+check, and it is measured rather than asserted. It also raises the bar on the
+transport claim: an ATE quoted without transport *and* toolchain cannot be
+reproduced. Pairs with P-04.
+
+---
+
+## P-02 — Close the embedded loop
+
+**Status:** todo. **Gating dependency: physical access to the Orin Nano.**
+Everything else in the two-week plan can proceed without it; this cannot.
+
+Current embedded section is one sequence, ASL transport, no baseline, no
+latency or memory numbers, and says so honestly. That honesty reads as a gap
+because the embedded platform is where the layout thesis is strongest: 2x on a
+6-core A78AE with a small cache means more than 2x on a 7950X.
+
+**Needs:** ROS 1 on the device (the current blocker forcing ASL transport),
+OpenVINS built on-device, full EuRoC + KAIST, and P-01's latency/RSS numbers on
+both platforms so the comparison is like-for-like.
+
+**Exit condition:** the same table as x86, on aarch64, with OpenVINS beside it.
+
+---
+
+## P-03 — DOD-Schur vs ov_SchurVINS
+
+**Status:** todo. `msckf/updater_schur.cpp` is built and unused;
+`/workspace/ov_schurvins_src` is on moonlab. A second baseline that nobody else
+can produce, because it requires both implementations of the same idea.
+
+**Note from T-002:** `update_msckf_schur()` does not apply the parallax
+whitening. Irrelevant now that the model is refuted, but confirm no other
+divergence before quoting numbers from that path.
+
+---
+
+## P-04 — Transport confound, full matrix
+
+**Status:** todo. Currently n=1 (MH_01, 0.1131 ASL vs 0.1296 bag) supporting a
+claim that this confound is "present, unremarked, in several papers". That
+claim needs 10 sequences x 2 estimators x 2 transports.
+
+**Caution learned today:** the 0.1131 figure in that comparison is one of the
+numbers T-013 could not reproduce at any commit. Re-measure both sides before
+building an argument on it.
+
+---
+
+## P-06 — Convert speed headroom into accuracy
+
+**Status:** todo, tight. The strongest reframing available ("same cost, better
+accuracy" beats "faster, same accuracy") and the least likely to fit two weeks.
+
+**Two warnings from this session.** Capping features at OpenVINS's 40 already
+lost accuracy on 6 of 8 sequences, and every constant swept today either
+transferred badly or turned out to be a different constant in disguise. If this
+is attempted, it is one lever, swept, gated — not a retune.
+
+---
+
+## P-07 — Artifact release
+
+**Status:** todo, small. Docker image, run scripts, and the timing/ATE CSVs.
+The control-tree method from T-003 is the reproducibility story: ship the
+script that builds two commits and diffs their estimate CSVs.
 
 ---
 
