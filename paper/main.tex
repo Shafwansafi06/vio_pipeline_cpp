@@ -33,7 +33,10 @@ public sequences (EuRoC MH/V1, KAIST circle/infinity), the reimplementation
 matches OpenVINS's absolute trajectory error (ATE) to within measurement
 parity --- better on 4 of 10 sequences, mean ATE 0.156\,m versus 0.158\,m,
 geometric-mean ratio 1.06 --- while running end-to-end at 1.76--2.10$\times$
-the wall-clock throughput (\texttt{hyperfine}, warmed cache, 5 runs). A
+the wall-clock throughput (\texttt{hyperfine}, warmed cache, 5 runs), and
+converging with zero re-tuning on an independent third dataset family (TUM
+VI, fisheye, mean ATE 0.062\,m across its six room sequences at parity with
+OpenVINS). A
 relative-pose-error analysis shows the accuracy gap is concentrated in the
 seconds immediately after filter initialization rather than in steady-state
 drift rate, which is equal to or better than OpenVINS on 7 of 8 EuRoC
@@ -709,6 +712,65 @@ exactly the kind of defect a same-platform test suite cannot find, and one
 we would not have found without attempting the embedded deployment this
 section reports.
 
+\section{Independent Evaluation on TUM VI}
+\label{sec:tumvi}
+
+Every result above was measured on datasets the pipeline's constants were
+tuned against (EuRoC, KAIST), and our own altitude work showed that
+inherited constants are the first thing that breaks on new data. As an
+independent test, the pipeline was run on the TUM VI benchmark
+\cite{schubert2018tumvi} with \emph{only its calibration adapted}: the
+dataset's own pinhole-equi-512 Kalibr release was read verbatim into the
+pipeline --- Kannala-Brandt~4 distortion through the existing equidistant
+camera model, $T_{\text{cam\_imu}}$ in the convention the KAIST runner
+already uses, and the BMI055 noise densities as shipped --- and every
+estimator knob is the EuRoC placeholder, marked as such in the
+configuration. Nothing in the pipeline was tuned on TUM VI. This is also
+the first fisheye camera the pipeline has processed; EuRoC, KAIST, and the
+embedded rig are all radtan-modelled.
+
+\begin{table}[t]
+\caption{TUM VI room sequences, ATE RMSE (m). Both estimators ran with the
+dataset's own Kalibr calibration; OpenVINS received the same release as its
+config, so the comparison is calibration-for-calibration.}
+\label{tab:tumvi}
+\centering
+\begin{tabular}{lrr}
+\toprule
+Sequence & Ours & OpenVINS \\
+\midrule
+room1 & 0.0841 & \textbf{0.0693} \\
+room2 & 0.0652 & \textbf{0.0542} \\
+room3 & \textbf{0.0661} & 0.0871 \\
+room4 & \textbf{0.0276} & 0.0359 \\
+room5 & \textbf{0.0910} & 0.1011 \\
+room6 & 0.0363 & \textbf{0.0327} \\
+\midrule
+Mean  & 0.0617 & 0.0634 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figs/tumvi_all_rooms.png}
+\caption{TUM VI room1--6: both estimators Umeyama-aligned to the mocap
+ground truth. All twelve runs (six per estimator) initialize and converge;
+no sequence was tuned for.}
+\label{fig:tumvi}
+\end{figure*}
+
+Table~\ref{tab:tumvi} and Figure~\ref{fig:tumvi} show the outcome: all six
+room sequences initialize and converge with zero retuning, at accuracy
+parity with OpenVINS (better on 3 of 6, mean 0.062\,m against 0.063\,m),
+and with statistically indistinguishable drift --- the 1\,s-window relative
+pose error (Section~\ref{sec:rpe}'s metric) is 0.0064--0.0101\,m for the
+reimplementation against 0.0053--0.0101\,m for OpenVINS across the six
+sequences. For a pipeline whose every constant was inherited from EuRoC
+and KAIST, converging untuned on a third dataset family --- different
+camera model, different IMU, different scene scale --- is the strongest
+available evidence that the estimator is not overfit to its benchmarks.
+
 \section{Limitations}
 \label{sec:limitations}
 
@@ -740,6 +802,12 @@ the Orin Nano with per-frame timing and peak RSS, but end-to-end wall-clock
 under \texttt{hyperfine}, thermal state, and CPU frequency governor behavior
 were not controlled or recorded; on a passively cooled module these can move
 both sides. The allocation profile (DHAT) is x86-only.
+
+\textbf{The TUM VI evaluation is x86-only and deliberately untuned.}
+Section~\ref{sec:tumvi} runs on the desktop toolchain; repeating it on the
+Orin Nano is future work. No estimator knob was swept on TUM VI --- that is
+the design of the test, and it means the numbers there are the untuned
+configuration's, not the pipeline's best.
 
 \textbf{Monocular operation is not supported.} The tracker frontend requires
 exactly two cameras; a single-camera front end would need new tracking code
@@ -787,11 +855,16 @@ the Orin Nano, by a narrower margin than on desktop x86 --- and surfaced a
 genuine cross-platform floating-point defect in an otherwise-unreached code
 path, illustrating that even a same-architecture, bit-identical-trajectory
 validation regime does not by itself certify cross-platform correctness.
+Finally, an untuned run on the TUM VI benchmark
+(Section~\ref{sec:tumvi}) --- a third dataset family and the first fisheye
+camera model --- converges on all six room sequences at parity with
+OpenVINS, evidence that the estimator is not overfit to the datasets its
+constants were tuned on.
 Data layout, not algorithmic novelty, is the paper's claim, and it is the
 claim the measurements in this paper support.
 
 \bibliographystyle{IEEEtran}
-\begin{thebibliography}{9}
+\begin{thebibliography}{10}
 
 \bibitem{geneva2020openvins}
 P.~Geneva, K.~Eckenhoff, W.~Lee, Y.~Yang, and G.~Huang,
@@ -822,6 +895,11 @@ D.~G.~Kottas, K.~J.~Wu, and S.~I.~Roumeliotis,
 R.~Fabian,
 \emph{Data-Oriented Design}, self-published, 2018.
 \url{https://www.dataorienteddesign.com/dodmain/}
+
+\bibitem{schubert2018tumvi}
+D.~Schubert, T.~Goll, N.~Demmel, V.~Usenko, J.~St{\"u}ckler, and D.~Cremers,
+``The TUM VI Benchmark for Evaluating Visual-Inertial Odometry,''
+\emph{Proc. IEEE/RSJ Int. Conf. Intelligent Robots and Systems (IROS)}, Madrid, Spain, 2018.
 
 \end{thebibliography}
 
