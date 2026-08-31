@@ -129,6 +129,10 @@ if(VIO_BUILD_ASL_RUNNER)
     find_package(OpenCV 4 REQUIRED COMPONENTS core imgproc imgcodecs video)
     add_executable(dod_asl_runner tools/dod_asl_runner.cpp)
     target_link_libraries(dod_asl_runner PRIVATE vio_frontend ${OpenCV_LIBS})
+    # TUM VI (Schubert et al., IROS 2018) ASL-format runner: independent test
+    # dataset, calibrated with the dataset's own pinhole-equi-512 release.
+    add_executable(tumvi_asl_runner tools/tumvi_asl_runner.cpp)
+    target_link_libraries(tumvi_asl_runner PRIVATE vio_frontend ${OpenCV_LIBS})
 endif()
 
 option(VIO_BUILD_ROS1 "Build the ROS1 offline bag runner and RViz publishers" OFF)

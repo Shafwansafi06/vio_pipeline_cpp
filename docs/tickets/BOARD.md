@@ -49,6 +49,7 @@ P-04 landed; P-06 was parked by user decision.
 |----|-------|--------|--------|
 | T-001 | Commit the FGI harness + diagnostics | **done** 862b3b8 | — |
 | T-002 | Commit the whitening wiring (lambda=0) | **done** 15b0860 | — |
+| T-014 | TUM VI independent test | **done — 6/6 converge, mean ATE 0.062 m, zero tuning** | — |
 | T-003 | Accuracy gate: 10-sequence sweep on moonlab | **done** PASS | — |
 | T-004 | Does 60_4 converge with max_dist=200? | **done — NO** | — |
 
@@ -340,6 +341,55 @@ The control-tree method from T-003 is the reproducibility story: ship the
 script that builds two commits and diffs their estimate CSVs.
 
 ---
+
+## T-014 — TUM VI independent test
+
+**Status:** done, 2026-08-31. **All six room sequences converge with no
+tuning: mean ATE 0.062 m.**
+
+**Setup.** The dataset (Schubert et al., IROS 2018) was never used to tune
+anything in this pipeline — that is the point. Adaptation is calibration
+only: the dataset's own `pinhole-equi-512` Kalibr release
+(`camchain-imucam-imucalib.yaml`, `imu-imucalib.yaml`) read verbatim into
+`tools/tumvi_options.hpp` — Kannala-Brandt 4 through the pipeline's existing
+EQUIDISTANT model, `T_cam_imu` in the same convention the KAIST runner uses,
+BMI055 noise densities as shipped. Every estimator knob is a EuRoC
+placeholder, marked as such. `tools/tumvi_asl_runner.cpp` is the ASL runner
+with a `mocap0` ground-truth fallback added (TUM VI ships mocap GT, not
+Leica/Vicon).
+
+**Results** (x86 host toolchain, g++ 11.4 / OpenCV 4.5.4; runs in
+`vio_parity/acv/tumvi/`, dataset on moonlab
+`/media/storage/moonlab/datasets/tumvi/`):
+
+| seq | ATE (m) | notes |
+|---|---|---|
+| room1 | 0.0841 | |
+| room2 | 0.0652 | |
+| room3 | 0.0661 | |
+| room4 | 0.0276 | |
+| room5 | 0.0910 | |
+| room6 | 0.0363 | mean 0.062 |
+
+All six initialized (featureless init fired on every one; room1
+`gravity-vs-accel` 1.02 deg), zero counter events (`[DROP]` all zero, no
+refusals, no meas overflow), 20 Hz / 512x512 / 200 Hz IMU processed at
+tracking 2.3 ms + estimator 2.7 ms per frame on one core-class x86 machine.
+
+**Why this matters.** The pipeline's every constant was tuned on EuRoC and
+KAIST (and the altitude work proved inherited constants are the first thing
+to break). An untuned run converging on a third dataset family — different
+camera model (fisheye KB4 vs radtan), different sensor, different scene —
+is the strongest evidence yet that the estimator is not overfit to its
+benchmarks. For scale, TUM VI's own paper reports baseline MSCKF-class
+results in the same 0.05–0.12 m band.
+
+**Not done:** no per-sequence sweeps of any knob (deliberate — independent
+test), no OpenVINS comparison on TUM VI (would need its config; out of
+scope for the ticket), corridor/magistrale/outdoors sequences not
+downloaded (partial GT only).
+
+
 
 ## T-001 — Commit the FGI harness + diagnostics
 
