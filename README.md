@@ -373,7 +373,7 @@ MSCKF visual-inertial odometry algorithm, designed against and benchmarked
 against **[OpenVINS](https://github.com/rpng/open_vins)** (Patrick Geneva,
 Guoquan Huang, et al., GPLv3) as the accuracy and design reference. No code
 is copied or derived from OpenVINS's source; every optimization is verified
-bit-identical against OpenVINS's own math (see `CLAUDE.md`, the `bitdiff_*`
+bit-identical against its own pre-change output (see `CLAUDE.md`, the `bitdiff_*`
 test suite, and the ten-sequence accuracy gate). The feature-less dynamic
 initializer follows sqrtVINS (Peng et al., T-RO 2025) Sec. V-A; the hovering
 classifier follows Kottas, Wu & Roumeliotis (IROS 2013); an optional,
