@@ -13,8 +13,7 @@
 
 \begin{document}
 
-\title{DODVins: A Data-Oriented, Allocation-Free MSCKF\\
-Visual-Inertial Odometry Pipeline with Measured Parity to OpenVINS}
+\title{DODVins: A Data-Oriented MSCKF Pipeline\\for Predictable Visual-Inertial Odometry}
 
 \author{
 \IEEEauthorblockN{Shafwan Safi, Nikhil Vashisht, Pranjal Upadhyay}
@@ -26,15 +25,19 @@ Visual-Inertial Odometry Pipeline with Measured Parity to OpenVINS}
 \begin{abstract}
 We present DODVins, a data-oriented C++ reimplementation of the multi-state
 constraint Kalman filter (MSCKF) visual-inertial odometry (VIO) pipeline
-used by OpenVINS. The filter equations are unchanged; what differs is the
-engineering: fixed-capacity, allocation-free per-frame state, no virtual
-dispatch, and a feature database that separates search keys from payloads.
+used by OpenVINS. The estimator's model is unchanged; what differs is the
+implementation: data-oriented memory layout --- fixed-capacity per-frame
+state, no virtual dispatch, a feature database that separates search keys
+from payloads, allocation-free propagation --- plus a small set of
+individually measured solver restructures, reported separately.
 Benchmarked on ten public sequences through the identical transport and
 toolchain container, DODVins matches OpenVINS's trajectory accuracy (better
 on 4 of 10, mean ATE 0.156\,m vs.\ 0.158\,m) while running 1.76--2.10$\times$
 faster end-to-end (with a 99th-percentile frame-latency advantage that
 exceeds its mean advantage, the tail being where the layout wins) and a
-flat 184--199\,MB memory footprint against OpenVINS's variable one. The
+bounded 184--199\,MB working set against OpenVINS's variable 98--179\,MB ---
+an intentional trade of lower average utilization for a bounded working
+set with allocation-free propagation. The
 design transfers to an NVIDIA Jetson Orin Nano (faster on all ten sequences,
 narrower margin), and the pipeline converges untuned on a third dataset
 family, TUM VI. We report each optimization's individually measured effect,
@@ -72,16 +75,14 @@ design: polymorphic state variable types, \texttt{std::vector} containers,
 and heap-allocated per-feature and per-measurement objects. The point of
 this description is not to criticize OpenVINS's engineering but to measure
 what that design pattern costs on a per-frame hot path, independent of the
-estimator's mathematics. Mike Acton and Richard Fabian's data-oriented
-design (DOD) literature \cite{fabian2018dod} argues that on such paths, the
-layout of data in memory --- not the algorithm expressed over it --- is
-usually the dominant cost, and that object-oriented abstractions frequently
-hide layout decisions a profiler would reject. This paper tests that
-argument on a production-shaped VIO pipeline rather than a microbenchmark:
-we reimplement OpenVINS's MSCKF pipeline in C++ under a small set of house
-rules --- no per-frame heap allocation, no virtual dispatch, all state in
-fixed-capacity tables, one transform per table --- and measure the result
-against the original on identical data through an identical transport.
+estimator's mathematics. Data-oriented design (DOD) \cite{fabian2018dod}
+argues that on such paths the layout of data in memory, not the algorithm
+expressed over it, is usually the dominant cost. We test that argument on a
+production-shaped VIO pipeline rather than a microbenchmark: the same MSCKF
+pipeline in C++ under a small set of house rules --- no per-frame heap
+allocation, no virtual dispatch, all state in fixed-capacity tables --- and
+measured against the original on identical data through an identical
+transport.
 
 The result is not a strict win. Reporting it as one would misrepresent the
 data: DODVins is faster by a wide, consistent margin, and it is
@@ -93,10 +94,11 @@ including the parts of the embedded comparison that remain unmeasured
 
 \textbf{Contributions.}
 \begin{itemize}
-\item A cache-layout redesign of the OpenVINS MSCKF pipeline validated
-  bit-identical against the original estimator's mathematics across ten
-  trajectories, with per-optimization, independently measured speedups
-  (Table~\ref{tab:ablation}).
+\item An implementation redesign of the OpenVINS MSCKF pipeline ---
+  memory layout plus numerically equivalent solver restructures --- in which
+  every accepted optimization leaves DODVins's trajectories bit-identical to
+  its own pre-change output across ten sequences, with per-optimization,
+  independently measured speedups (Table~\ref{tab:ablation}).
 \item A same-transport benchmarking methodology (identical bag, identical
   transport, both estimators as ROS nodes in the identical toolchain
   container) plus a measured decomposition of the two environmental
@@ -162,10 +164,15 @@ DODVins follows a small, fixed set of constraints applied
 uniformly to every file on the per-frame path:
 
 \begin{enumerate}
-\item \textbf{No per-frame allocation.} No \texttt{new}, no
-  \texttt{std::vector::push\_back}, no \texttt{std::string}, no
-  \texttt{std::function}. All per-frame state lives in fixed-capacity structs
-  or a bump-pointer arena reset at a known frame boundary.
+\item \textbf{No variable-sized per-frame objects.} No \texttt{new}
+  for features, measurements, or state variables, no
+  \texttt{std::vector::push\_back} on the frame path, no
+  \texttt{std::string}, no \texttt{std::function}. All per-frame state
+  lives in fixed-capacity structs or a bump-pointer arena reset at a known
+  frame boundary. The dense linear algebra of the update step uses a
+  bounded set of per-frame workspaces (measured in
+  Section~\ref{sec:results}); the propagation path allocates nothing,
+  which a test asserts.
 \item \textbf{All memory bounded at initialization.} Every array carries a
   compile-time capacity constant; \texttt{init\_*()} functions validate the
   configured maximum against it and abort loudly rather than corrupt memory
@@ -184,10 +191,9 @@ uniformly to every file on the per-frame path:
   both stay tractable.
 \end{enumerate}
 
-These are restatements of data-oriented design as documented by Fabian
-\cite{fabian2018dod}; the contribution here is applying them uniformly to a
-full, non-trivial MSCKF pipeline and measuring the result, not the rules
-themselves.
+These restate data-oriented design as documented by Fabian
+\cite{fabian2018dod}; the contribution is applying them uniformly to a
+full MSCKF pipeline and measuring the result.
 
 \subsection{The feature database}
 
@@ -204,10 +210,8 @@ payloads physically sorted by ID, so every newly observed feature required a
 feature copies per frame, 22.9\,MB/s of pure \texttt{memcpy}, to maintain an
 ordering over what is structurally a 4-byte key. Separating key from payload
 turns that insertion cost into a shift of 4-byte integers instead of
-2400-byte structs, with feature payload addresses now stable across a
-compaction (freed slots are recycled through a stack rather than by
-shifting), which is strictly safer for any caller that had cached a pointer
-across a cleanup pass.
+2400-byte structs, and keeps feature payload addresses stable across
+compaction.
 
 \subsection{Square-root-form EKF update}
 \label{sec:sqrtform}
@@ -232,13 +236,11 @@ frames --- measured to abort the filter on EuRoC MH\_01 at approximately
 $t{=}16$\,s. The rank-$k$ form is symmetric by construction and does not
 exhibit this failure.
 
-For scale: the speed contribution of this change is real but small ---
-0.29\,ms per frame across the two affected stages (Table~\ref{tab:ablation},
-row 3), roughly 8\% of the total per-frame reduction from all accepted
-changes. The bulk of the end-to-end speedup comes from the memory-layout
-decisions, not from this algorithmic restructure; the square-root form's
-primary contribution is the correctness property above, with the speed
-difference a secondary effect.
+For scale: the speed contribution is real but small --- 0.29\,ms per
+frame across the two affected stages (Table~\ref{tab:ablation}, row 3),
+roughly 8\% of the total per-frame reduction from all accepted changes.
+The square-root form's primary contribution is the correctness property
+above; the speed difference is secondary.
 
 \subsection{Feature-less dynamic initialization}
 \label{sec:featureless-init}
@@ -327,13 +329,10 @@ V1\_03 & 0.0550 & 0.0564 & 3\% \\
 Ten public sequences: EuRoC MH\_01--MH\_05 (machine hall) and V1\_01--V1\_03
 (vicon room), and two KAIST Complex Urban sequences (circle, infinity),
 covering handheld/UAV indoor flight and ground-vehicle outdoor driving.
-Ground truth for MH\_* comes from the bag's \texttt{/leica/position} topic;
-V1\_* publishes vicon pose on a differently named topic
-(\texttt{/vicon/firefly\_sbx/firefly\_sbx}, a \texttt{TransformStamped})
-which required a small conversion script, since the estimator's default
-ground-truth extraction assumed the \texttt{/leica/position} topic name and
-silently produced an empty reference file on V1\_* until this was found and
-fixed.
+MH\_* ground truth is the bag's \texttt{/leica/position} topic; V1\_*
+ships vicon pose on a differently named topic that the default extraction
+does not handle, so V1\_* is scored against the dataset's ASL ground-truth
+stream instead.
 
 \subsection{Wall-clock methodology}
 Wall-clock comparisons use \texttt{hyperfine} 1.18.0, \texttt{-i} (ignore
@@ -422,16 +421,21 @@ duty-cycled platform actually pays for.
 
 \subsection{Allocation profile}
 
-Over 12 seconds of EuRoC MH\_01, DHAT reports 825{,}790 heap blocks and
-2.02\,GB total allocated, down from an earlier 1{,}322{,}658 blocks /
-5.32\,GB baseline (a 38\% block-count and 62\% byte reduction) after
-eliminating three sites responsible for nearly all of the
-DODVins-attributable churn, the largest being three heap temporaries
-allocated per (state variable, measurement variable) pair inside a
-covariance-initialization routine (463{,}000 allocations, the largest
-single-site count). Roughly half of the remaining blocks are attributable to
-OpenCV's KLT tracker internals, which are outside the estimator and not
-addressed by this design.
+Over 12 seconds of EuRoC MH\_01, DHAT reports 777{,}007 heap blocks and
+1.89\,GB total allocated (down from an earlier 1{,}322{,}658-block baseline
+after eliminating three sites responsible for nearly all of the
+DODVins-attributable churn). Attributing every allocation site by its call
+stack: 59\% of blocks are OpenCV's KLT tracker internals, 15\% are
+one-time library startup, 3\% dataset I/O, and 19\% belong to DODVins's
+estimator path --- and those 19\% are the honest caveat to the
+allocation-free claim: the update step allocates a bounded set of dense
+Eigen workspaces every frame, measured at 137 blocks and 3.8\,MB per frame
+in \texttt{EKFUpdate}. What \emph{is} allocation-free is the propagation
+path (asserted by a unit test) and the per-frame state itself: no
+per-feature or per-measurement objects are ever heap-allocated, and the
+working set does not grow with sequence length or feature count. The
+prediction-free alternative --- per-feature heap objects, as in the
+reference design --- allocates in proportion to scene content instead.
 
 \subsection{Per-frame latency and predictability}
 \label{sec:latency}
@@ -440,7 +444,8 @@ Mean throughput is the metric a real-time reviewer trusts least, because it
 hides exactly the tail a real-time system cares about. Every run in this
 paper therefore records per-frame tracking-plus-estimation latency
 (excluding bag I/O) for both estimators. Table~\ref{tab:latency} reports
-p50/p99/max on x86; Figure~\ref{fig:cdf} shows the full distributions.
+p50/p99/max on x86 (full per-sequence distributions in the released
+artifact).
 
 \begin{table}[t]
 \caption{Per-frame pipeline latency, x86 (tracking + estimation, excluding
@@ -468,14 +473,6 @@ infinite & 3.7 & 6.1 & 6.4 & 10.0 \\
 \end{tabular}
 \end{table}
 
-\begin{figure}[t]
-\centering
-\includegraphics[width=0.92\columnwidth]{figs/latency_cdf.png}
-\caption{Per-frame latency CDFs on x86, both estimators, all ten sequences
-(log scale; dotted line: the 50\,ms EuRoC 20\,Hz frame budget).}
-\label{fig:cdf}
-\end{figure}
-
 The 99th-percentile ratio (1.64--2.05$\times$) exceeds the median ratio
 (1.63--1.85$\times$) on 8 of 10 sequences: the tail is where the
 data-oriented layout pulls further ahead, not behind. Worst observed frames
@@ -486,10 +483,10 @@ latency number, and it is measured, not argued.
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=0.9\columnwidth]{figs/tradeoff.png}
+\includegraphics[width=0.84\columnwidth]{figs/tradeoff.png}
 \caption{The accuracy/efficiency trade-off per sequence, x86: mean
 per-frame latency (y) against ATE (x). DODVins's points sit below
-OpenVINS's on every sequence at statistically equal accuracy; the
+OpenVINS's on every sequence at comparable accuracy; the
 speedup does not purchase accuracy anywhere on the benchmark.}
 \label{fig:tradeoff}
 \end{figure}
@@ -497,20 +494,28 @@ speedup does not purchase accuracy anywhere on the benchmark.}
 \subsection{Per-optimization ablation}
 
 \begin{table*}[t]
-\caption{Individually measured optimizations. Every row: all ten ATEs bit-identical before and after.}
+\caption{Individually measured optimizations, classified by kind. Every row:
+DODVins's ten ATEs are bit-identical to its own pre-change output. Rows were
+measured sequentially at their landing point, so effects are not strictly
+additive.}
 \label{tab:ablation}
 \centering
 \begin{tabular}{cll}
 \toprule
 \# & Change & Effect \\
 \midrule
-1 & Feature DB: separate key order from payload storage & 9{,}556 memcpy/frame $\rightarrow$ 0 \\
+\multicolumn{3}{l}{\emph{Solver restructures (numerically equivalent or accuracy-gated arithmetic)}} \\
 2 & Exact early-accept for the $\chi^2$ gate ($S \succeq \sigma^2 I$ bound) & MSCKF $\chi^2$: 0.273$\rightarrow$0.079\,ms \\
 3 & Square-root-form EKF update (Sec.~\ref{sec:sqrtform}) & S+inv: 0.436$\rightarrow$0.263\,ms; K: 0.272$\rightarrow$0.160\,ms \\
 4 & $M_a = PH^\top$ as one GEMM instead of per-block products & 0.668$\rightarrow$0.461\,ms \\
+7 & Measurement compression + $\chi^2$ restructuring & MSCKF stage: 1.535$\rightarrow$1.000\,ms \\
+\midrule
+\multicolumn{3}{l}{\emph{Storage and layout changes}} \\
+1 & Feature DB: separate key order from payload storage & 9{,}556 memcpy/frame $\rightarrow$ 0 \\
 5 & \texttt{STATE\_COV\_CAPACITY} 512$\rightarrow$384 (matches true worst case, 341) & Cov update: 0.745$\rightarrow$0.506\,ms \\
 6 & DHAT-guided allocation cuts (3 sites) & 1{,}322{,}658$\rightarrow$825{,}790 blocks \\
-7 & Measurement compression + $\chi^2$ restructuring & MSCKF stage: 1.535$\rightarrow$1.000\,ms \\
+\midrule
+\multicolumn{3}{l}{\emph{Mixed (arithmetic and data placement restructured together)}} \\
 8 & $M_a$/covariance-update restructuring (first pass) & Per-frame: 7.40$\rightarrow$5.43\,ms \\
 \bottomrule
 \end{tabular}
@@ -523,9 +528,21 @@ DODVins at OpenVINS's own 40-feature update cap changed the MSCKF stage by
 only 3\% and cost accuracy on 6 of 8 sequences (reverted), and the $M_a$
 accumulation loop was already structured identically to OpenVINS's ---
 though restructuring it was still worth 2.2$\times$ for a different,
-profiled reason (row 4). On this codebase, plausible causal narratives
-about where time goes have been wrong more often than right; every change
-in Table~\ref{tab:ablation} was accepted only after a profile, not a guess.
+profiled reason (row 4).
+
+The classification above is the paper's answer to which kind of change
+buys what. The cleanly attributable solver restructures account for
+1.22\,ms/frame of stage-level savings; the attributable storage changes
+account for 0.24\,ms/frame plus the feature-database memcpy elimination;
+row 8 restructured arithmetic and data placement together and cannot be
+attributed to one class. The tail-latency signature of
+Section~\ref{sec:latency} --- the p99 advantage exceeding the mean
+advantage --- is the evidence that data placement contributes beyond its
+isolated arithmetic: allocator activity and cache misses land in spikes,
+and that is where DODVins pulls furthest ahead. On this codebase,
+plausible causal narratives about where time goes have been wrong more
+often than right; every change in Table~\ref{tab:ablation} was accepted
+only after a profile, not a guess.
 
 \subsection{Relative pose error: locating the accuracy gap}
 \label{sec:rpe}
@@ -550,23 +567,21 @@ V1\_03 & \textbf{0.0140} & 0.0222 \\
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:ate}'s aggregate ATE does not, by itself, indicate which
-component of the pipeline --- initialization or the filter's steady-state
-drift rate --- is responsible for a given sequence's result. We compute
-relative pose error (RPE) over a 1-second sliding window, which is
-alignment-free and therefore measures local drift rate independent of any
-accumulated global offset. Table~\ref{tab:rpe} shows DODVins's
+Aggregate ATE does not indicate whether initialization or the filter's
+steady-state drift rate is responsible for a sequence's result. We compute
+relative pose error (RPE) over a 1-second sliding window --- alignment-free,
+so it measures local drift rate independent of any accumulated global
+offset. Table~\ref{tab:rpe} shows DODVins's
 steady-state drift rate is better than OpenVINS's on five of eight EuRoC
-sequences, statistically equal on two (MH\_01, MH\_05), and worse on one
+sequences, comparable on two (MH\_01, MH\_05; within 2\%), and worse on one
 (MH\_02, by 3.5\%). The filter itself is not, in aggregate, the source of
 the ATE gap in Table~\ref{tab:ate}.
 
 Decomposing MH\_01 and MH\_02 by elapsed time confirms where the gap is:
-DODVins initializes 1.8--2.8\,s \emph{earlier} than OpenVINS and starts
-from a measurably worse initial state (first-5\,s RMSE on MH\_02: 0.2133\,m
-vs.\ 0.1188\,m) despite near-identical drift thereafter. MH\_02's overall
-ATE gap (Table~\ref{tab:ate}) is attributable to this initialization
-transient, not to a persistent difference in filter quality.
+DODVins initializes 1.8--2.8\,s \emph{earlier} and starts from a worse
+initial state (first-5\,s RMSE on MH\_02: 0.2133\,m vs.\ 0.1188\,m)
+despite near-identical drift thereafter --- MH\_02's overall ATE gap is an
+initialization transient, not a difference in filter quality.
 
 \subsection{Fixing what silent failure paths hid}
 
@@ -593,14 +608,12 @@ find defects that only manifest under input it does not produce.
 
 To test the design where memory layout is supposed to matter most, both
 estimators were built and run on an NVIDIA Jetson Orin Nano Super (6-core
-Cortex-A78AE, 8\,GB LPDDR5, JetPack~6 / L4T~R36.4). Both were compiled inside
-an aarch64 Ubuntu~20.04 container with GCC~9.4.0 and OpenCV~4.2.0, the
-\emph{identical toolchain} as the x86 container of Section~\ref{sec:setup},
-so that the only variable between the two platforms' results is the
-processor. All ten benchmark sequences were run on-device for both
-estimators through the same direct-rosbag transport as x86, and every run
-recorded per-frame timing and peak RSS exactly as on x86
-(Section~\ref{sec:results}).
+Cortex-A78AE, 8\,GB LPDDR5, JetPack~6 / L4T~R36.4) inside an aarch64
+Ubuntu~20.04 container with GCC~9.4.0 and OpenCV~4.2.0 --- the identical
+toolchain as the x86 container of Section~\ref{sec:setup}, so the only
+variable between platforms is the processor. All ten sequences ran
+on-device for both estimators through the same direct-rosbag transport as
+x86, with per-frame timing and peak RSS recorded as on x86.
 
 \begin{table}[t]
 \caption{Per-frame pipeline latency on the Jetson Orin Nano Super
@@ -643,9 +656,8 @@ DODVins is the only one whose \emph{median} stays within budget on
 all ten sequences, and its peak RSS is flat (184--199\,MB across all ten
 sequences, against OpenVINS's 98--179\,MB variable). The bounded-memory
 design's cost is visible here too: it pre-allocates that working set whether
-or not a sequence needs it. Per-sequence latency CDFs for both estimators
-(x86 counterpart: Figure~\ref{fig:cdf}) show the same direction; the margin
-does not transfer in full.
+or not a sequence needs it. Per-sequence latency distributions for both estimators show the same
+direction; the margin does not transfer in full.
 
 \textbf{Accuracy on-device.} DODVins completed all ten sequences
 without divergence. ATEs (the seven sequences for which the bag transport
@@ -697,18 +709,15 @@ section reports.
 \label{sec:tumvi}
 
 Every result above was measured on datasets the pipeline's constants were
-tuned against (EuRoC, KAIST), and our own altitude work showed that
-inherited constants are the first thing that breaks on new data. As an
-independent test, the pipeline was run on the TUM VI benchmark
-\cite{schubert2018tumvi} with \emph{only its calibration adapted}: the
-dataset's own pinhole-equi-512 Kalibr release was read verbatim into the
-pipeline --- Kannala-Brandt~4 distortion through the existing equidistant
-camera model, $T_{\text{cam\_imu}}$ in the convention the KAIST runner
-already uses, and the BMI055 noise densities as shipped --- and every
-estimator knob is the EuRoC placeholder, marked as such in the
-configuration. Nothing in the pipeline was tuned on TUM VI. This is also
-the first fisheye camera the pipeline has processed; EuRoC, KAIST, and the
-embedded rig are all radtan-modelled.
+tuned against, and our own altitude work showed that inherited constants
+are the first thing that breaks on new data. As an independent test, the
+pipeline was run on the TUM VI benchmark \cite{schubert2018tumvi} with
+\emph{only its calibration adapted}: the dataset's own pinhole-equi-512
+Kalibr release read verbatim (Kannala-Brandt~4 through the existing
+equidistant model, $T_{\text{cam\_imu}}$ in the KAIST convention, BMI055
+noise densities as shipped), with every estimator knob the marked EuRoC
+placeholder. This is also the first fisheye camera the pipeline has
+processed.
 
 \begin{table}[t]
 \caption{TUM VI room sequences, ATE RMSE (m). Both estimators ran with the
@@ -734,7 +743,7 @@ Mean  & 0.0617 & 0.0634 \\
 
 \begin{figure*}[t]
 \centering
-\includegraphics[width=0.88\textwidth]{figs/tumvi_all_rooms.png}
+\includegraphics[width=0.8\textwidth]{figs/tumvi_all_rooms.png}
 \caption{TUM VI room1--6: both estimators Umeyama-aligned to the mocap
 ground truth. All twelve runs (six per estimator) initialize and converge;
 no sequence was tuned for.}
@@ -744,13 +753,63 @@ no sequence was tuned for.}
 Table~\ref{tab:tumvi} and Figure~\ref{fig:tumvi} show the outcome: all six
 room sequences initialize and converge with zero retuning, at accuracy
 parity with OpenVINS (better on 3 of 6, mean 0.062\,m against 0.063\,m),
-and with statistically indistinguishable drift: the 1\,s-window relative
+and with comparable drift: the 1\,s-window relative
 pose error (Section~\ref{sec:rpe}'s metric) is 0.0064--0.0101\,m for the
 DODVins against 0.0053--0.0101\,m for OpenVINS across the six
 sequences. For a pipeline whose every constant was inherited from EuRoC
 and KAIST, converging untuned on a third dataset family (different camera
 model, different IMU, different scene scale) is the strongest
 available evidence that the estimator is not overfit to its benchmarks.
+
+\section{High-Altitude Outdoor Evaluation}
+\label{sec:fgi}
+
+EuRoC, TUM VI, and KAIST are indoor benchmarks with scene depth of a few
+meters. Outdoor UAV flight is the harder regime for stereo VIO: the FGI
+Masala dataset \cite{george2023fgi} flies a downward-facing 30\,cm-baseline
+stereo rig at 40/60/80/100\,m of altitude, where the depth-to-baseline
+ratio reaches 130--330 and stereo depth error grows with its square. Both
+estimators were run on the four 4\,m/s sequences with the dataset's own
+calibration, and DODVins in two configurations: with the pixel measurement
+noise inherited from EuRoC ($\sigma{=}1$), and with a single per-altitude
+value fitted on these sequences ($\sigma{=}10$--15; reported for
+completeness --- it is tuned on the test data, not a tuning-free claim).
+
+\begin{table}[t]
+\caption{FGI Masala, ATE (m) at 4\,m/s. $\times$ marks divergence. No
+shipped configuration covers the altitude envelope; a single inherited
+constant separates DODVins from covering it.}
+\label{tab:fgi}
+\centering
+\begin{tabular}{lrrr}
+\toprule
+Altitude & DODVins ($\sigma{=}1$) & DODVins (tuned $\sigma$) & OpenVINS \\
+\midrule
+40\,m  & 12.81 & 12.81 & \textbf{4.19} \\
+60\,m  & 1367.7 $\times$ & 48.25 & \textbf{12.22} \\
+80\,m  & 56303 $\times$ & \textbf{23.17} & 145059 $\times$ \\
+100\,m & 94897 $\times$ & 110.27 & \textbf{57.21} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:fgi} makes three points. First, no shipped configuration
+covers the envelope: DODVins with the inherited constant diverges above
+40\,m, and OpenVINS's default configuration --- which initializes at all
+four altitudes --- diverges at 80\,m (490\,km of estimated path over a
+1.2\,km trajectory). Second, the dominant lever is a single inherited
+measurement-noise constant, the same species of failure as
+Section~\ref{sec:toolchain} but at outdoor scale: correcting it recovers
+DODVins across 60--100\,m. Third, neither estimator is uniformly better
+where both run --- OpenVINS wins at 40/60/100\,m, DODVins is the only
+survivor at 80\,m. Per-frame cost is unchanged outdoors (DODVins median
+2.6--3.9\,ms, p99 6.8--8.2\,ms, far inside the 16\,Hz budget), so the
+speed claim of Section~\ref{sec:latency} is not indoor-specific; what the
+regime breaks is measurement weighting for long-baseline tracks, in both
+pipelines. The diagnosis came from DODVins's per-path counters rather
+than from accuracy alone: at 80\,m the conditioning gate rejects most
+triangulations and the filter starves of features before it ever
+mis-weights one.
 
 \section{Limitations}
 \label{sec:limitations}
@@ -813,23 +872,16 @@ sequence, which remains unimplemented.
 
 \section{Conclusion}
 
-Reimplementing an existing MSCKF pipeline under strict data-oriented
-constraints --- fixed-capacity per-frame state, no per-frame allocation, no
-virtual dispatch --- yields a consistent 1.76--2.10$\times$ end-to-end
-wall-clock speedup over the reference OpenVINS implementation, measured
-through an identical transport on ten public sequences, at accuracy parity
-rather than accuracy superiority (mean ATE 0.156\,m against the reference's
-0.158\,m, better on 4 of the 10 sequences and worse on 6). A finer-grained
-relative-pose-error analysis shows DODVins's steady-state
-filter quality is, if anything, slightly better than the reference on the
-majority of EuRoC sequences, and that the aggregate accuracy gap is
-concentrated in initialization-timing transients rather than in the
-estimator itself. Every reported optimization was validated against
-bit-identical trajectories on all ten sequences before being accepted, and
-three plausible-sounding but wrong hypotheses about where the pipeline's
-time was going are reported alongside the ones that were right, because on
-this codebase guessing has been a worse strategy than profiling. The
-embedded deployment (Section~\ref{sec:embedded}) shows the advantage
+Reimplementing OpenVINS's MSCKF pipeline under strict data-oriented
+constraints --- fixed-capacity per-frame state, no virtual dispatch ---
+yields a consistent 1.76--2.10$\times$ end-to-end wall-clock speedup on
+ten public sequences at accuracy parity (mean ATE 0.156\,m vs.\
+0.158\,m; better on 4 of 10), with steady-state drift comparable or
+better on 7 of 8 EuRoC sequences --- the aggregate gap is an
+initialization transient, not filter quality --- and every optimization
+accepted only after leaving all ten trajectories bit-identical to their
+pre-change output. The embedded deployment (Section~\ref{sec:embedded})
+shows the advantage
 transfers in direction but not in size (faster on all ten sequences on
 the Orin Nano, by a narrower margin than on desktop x86) and surfaced a
 genuine cross-platform floating-point defect in an otherwise-unreached code
@@ -841,23 +893,22 @@ camera model, converges on all six room sequences at parity with
 OpenVINS, evidence that the estimator is not overfit to the datasets its
 constants were tuned on.
 
-For a practitioner the guidance this benchmark supports is narrow but
-concrete. On desktop-class x86, DODVins delivers the same MSCKF
-trajectories as OpenVINS for roughly half the wall-clock, a quarter to a
-third less processor time, a frame-latency tail that stays under the
-sensor's frame budget where the reference's does not, and a flat memory
-footprint --- at the price of a larger, pre-allocated working set and no
-monocular support. On a Jetson-class embedded SoC the direction of every
-one of those statements is unchanged; only the margin narrows. Teams whose
-estimator must share the compute budget with control and navigation get
-the freed share without changing a filter equation; teams relying on loop
-closure or tight memory ceilings should weigh the trade-offs recorded in
-Section~\ref{sec:limitations} before choosing.
-Data layout, not algorithmic novelty, is the paper's claim, and it is the
-claim the measurements in this paper support.
+For a practitioner the guidance is narrow but concrete: on desktop x86,
+DODVins delivers the same MSCKF trajectories as OpenVINS for roughly half
+the wall-clock and a quarter to a third less processor time, with a
+frame-latency tail inside the sensor's budget and a bounded working set ---
+at the price of higher average memory utilization and no monocular
+support. On a Jetson-class SoC every statement keeps its direction; only
+the margin narrows. Teams whose estimator shares the compute budget with
+control and navigation get the freed share without changing a filter
+equation; teams relying on loop closure or tight memory ceilings should
+weigh the trade-offs in Section~
+ef{sec:limitations}. The claim is about
+implementation, not estimator novelty --- layout plus measured solver
+restructures --- and the measurements support both attributions.
 
 \bibliographystyle{IEEEtran}
-\begin{thebibliography}{10}
+\begin{thebibliography}{11}
 
 \bibitem{geneva2020openvins}
 P.~Geneva, K.~Eckenhoff, W.~Lee, Y.~Yang, and G.~Huang,
@@ -893,6 +944,11 @@ R.~Fabian,
 D.~Schubert, T.~Goll, N.~Demmel, V.~Usenko, J.~St{\"u}ckler, and D.~Cremers,
 ``The TUM VI Benchmark for Evaluating Visual-Inertial Odometry,''
 \emph{Proc. IEEE/RSJ Int. Conf. Intelligent Robots and Systems (IROS)}, Madrid, Spain, 2018.
+
+\bibitem{george2023fgi}
+A.~George, N.~Koivum{\"a}ki, T.~Hakala, J.~Suomalainen, and E.~Honkavaara,
+``Visual-Inertial Odometry Using High Flying Altitude Drone Datasets,''
+\emph{Drones}, vol.~7, no.~1, p.~36, 2023.
 
 \end{thebibliography}
 
