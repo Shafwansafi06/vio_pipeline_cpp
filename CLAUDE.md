@@ -22,7 +22,7 @@ at length. Profile first.
 
 ## Tools
 
-Both are installed on the lab box (`moonlab@LAB_X86_HOST`). `sudo` there wants
+Both are installed on the lab box (`moonlab (lab x86 box)`). `sudo` there wants
 a password, so neither was installed with a package manager — do not assume
 `apt` is available.
 

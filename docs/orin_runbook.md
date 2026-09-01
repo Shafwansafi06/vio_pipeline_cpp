@@ -43,8 +43,8 @@ preference:
 ## Staging (from moonlab host)
 
     # bags (MH_01 already proved; take all ten for the full table)
-    scp moonlab@LAB_X86_HOST:/media/storage/moonlab/vio_parity/{MH_01_easy,V1_01_easy}.bag orin:bags/
-    scp moonlab@LAB_X86_HOST:/media/storage/moonlab/vio_parity/euroc_bags/*.bag orin:bags/
+    scp moonlab (lab x86 box):/media/storage/moonlab/vio_parity/{MH_01_easy,V1_01_easy}.bag orin:bags/
+    scp moonlab (lab x86 box):/media/storage/moonlab/vio_parity/euroc_bags/*.bag orin:bags/
     # EuRoC ASL zips for the ROS-free path
     # repo tree + tools/p01 wrappers
     git -C vio_pipeline_cpp archive HEAD | ssh orin 'mkdir -p vio && tar x -C vio'

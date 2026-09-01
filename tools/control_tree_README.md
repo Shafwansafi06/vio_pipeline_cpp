@@ -6,7 +6,7 @@ run both on the SAME data, and compare estimate CSVs byte-for-byte. Exact,
 immune to environment drift, and it has resolution (distinct md5 per
 sequence proves the comparison can tell two things apart).
 
-Usage (on the lab box, moonlab@LAB_X86_HOST, in ros_container_v2):
+Usage (on the lab box, moonlab (lab x86 box), in ros_container_v2):
 
     BASE=<base-commit-or-ref> NAME=<label> DATA=<euroc-asl-dir> bash tools/control_tree.sh
 

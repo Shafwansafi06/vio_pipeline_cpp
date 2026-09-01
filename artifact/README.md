@@ -5,14 +5,14 @@ repository. This file is the map.
 
 ## Environments
 
-- **x86 container**: `ros_container_v2` on moonlab@LAB_X86_HOST — Ubuntu 20.04,
+- **x86 container**: `ros_container_v2` on moonlab (lab x86 box) — Ubuntu 20.04,
   ROS1 Noetic, OpenCV 4.2.0, g++ 9.4.0. All x86 tables (ATE, wall-clock,
   latency, RSS) come from inside this container. Runs of 2026-08-30.
 - **aarch64 container**: `ov_ros1_20_04` on the Jetson Orin Nano
-  (moonlab@LAB_ORIN_HOST) — Ubuntu 20.04 arm64, same g++ 9.4.0 / OpenCV 4.2.0,
+  (moonlab (Orin Nano)) — Ubuntu 20.04 arm64, same g++ 9.4.0 / OpenCV 4.2.0,
   so the ISA is the only variable against the x86 tables.
 
-## Data on the lab box (moonlab@LAB_X86_HOST)
+## Data on the lab box (moonlab (lab x86 box))
 
 | path | contents |
 |---|---|

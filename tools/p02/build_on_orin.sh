@@ -2,10 +2,11 @@
 # P-02: build both estimators on the Orin inside ov_ros1_20_04 (Ubuntu 20.04
 # aarch64, g++ 9.4, OpenCV 4.2.x) — the same toolchain as the x86 container,
 # so the only variable vs the x86 numbers is the architecture.
-# Run on the Orin host: bash ~/p02/build.sh
+# Run on the Orin host: bash ~/p02/build.sh   (the user is in the docker
+# group, so no sudo is needed)
 set -e
 export ROS_DISTRO=noetic
-echo "REDACTED" | sudo -S docker run --rm \
+docker run --rm \
     -v "$HOME/p02:/p02" \
     ov_ros1_20_04:latest bash -c '
 set -e

@@ -2,7 +2,7 @@
 
 ## Scope and baselines
 
-- Remote host: `moonlab@LAB_X86_HOST`. All three implementations live
+- Remote host: `moonlab (lab x86 box)`. All three implementations live
   **inside the running Docker container `ros_container_v2`**, not on the host
   filesystem directly — `/workspace/...` paths below are container paths
   (`docker exec ros_container_v2 ...`).
