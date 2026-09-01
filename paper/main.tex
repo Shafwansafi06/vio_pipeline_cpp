@@ -17,8 +17,8 @@
 A Cache-Layout Reimplementation with Measured Parity to OpenVINS}
 
 \author{
-\IEEEauthorblockN{Shafwan Safi, Nikhil Vashisht}
-\IEEEauthorblockA{Indian Institute of Science Education and Research (IISER) Bhopal \\ shafwansafi06@gmail.com}
+\IEEEauthorblockN{Shafwan Safi, Nikhil Vashisht, Pranjal Upadhyay}
+\IEEEauthorblockA{Indian Institute of Science Education and Research (IISER) Bhopal}
 }
 
 \maketitle
@@ -237,6 +237,14 @@ asymmetry to drive covariance diagonals negative within a few hundred
 frames --- measured to abort the filter on EuRoC MH\_01 at approximately
 $t{=}16$\,s. The rank-$k$ form is symmetric by construction and does not
 exhibit this failure.
+
+For scale: the speed contribution of this change is real but small ---
+0.29\,ms per frame across the two affected stages (Table~\ref{tab:ablation},
+row 3), roughly 8\% of the total per-frame reduction from all accepted
+changes. The bulk of the end-to-end speedup comes from the memory-layout
+decisions, not from this algorithmic restructure; the square-root form's
+primary contribution is the correctness property above, with the speed
+difference a secondary effect.
 
 \subsection{Feature-less dynamic initialization}
 \label{sec:featureless-init}
