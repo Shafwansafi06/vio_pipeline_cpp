@@ -32,8 +32,8 @@ dispatch, and a feature database that separates search keys from payloads.
 Benchmarked on ten public sequences through the identical transport and
 toolchain container, DODVins matches OpenVINS's trajectory accuracy (better
 on 4 of 10, mean ATE 0.156\,m vs.\ 0.158\,m) while running 1.76--2.10$\times$
-faster end-to-end --- with a 99th-percentile frame-latency advantage that
-exceeds its mean advantage, the tail being where the layout wins --- and a
+faster end-to-end (with a 99th-percentile frame-latency advantage that
+exceeds its mean advantage, the tail being where the layout wins) and a
 flat 184--199\,MB memory footprint against OpenVINS's variable one. The
 design transfers to an NVIDIA Jetson Orin Nano (faster on all ten sequences,
 narrower margin), and the pipeline converges untuned on a third dataset
@@ -55,7 +55,7 @@ Flying robots, AR/VR headsets, and embedded rovers share a hard constraint:
 state estimation must run per frame, on hardware that also has to drive
 control and navigation, within a power budget. For a team deploying a
 visual-inertial odometry (VIO) pipeline on such hardware, the estimator's
-mathematics is only half the problem --- the other half is what its
+mathematics is only half the problem; the other half is what its
 implementation costs on a per-frame hot path, in wall-clock, in the tail of
 the frame-latency distribution, and in memory. It is not clear from
 existing results in the literature what those costs actually are for the
@@ -69,9 +69,9 @@ OpenVINS \cite{geneva2020openvins} is a widely used, carefully engineered
 open-source MSCKF implementation and is the accuracy and design reference
 for this work. Its C++ implementation follows conventional object-oriented
 design: polymorphic state variable types, \texttt{std::vector} containers,
-and heap-allocated per-feature and per-measurement objects. This is not a
-criticism of OpenVINS's engineering; it is an observation about what that
-design pattern costs on a per-frame hot path, independent of the
+and heap-allocated per-feature and per-measurement objects. The point of
+this description is not to criticize OpenVINS's engineering but to measure
+what that design pattern costs on a per-frame hot path, independent of the
 estimator's mathematics. Mike Acton and Richard Fabian's data-oriented
 design (DOD) literature \cite{fabian2018dod} argues that on such paths, the
 layout of data in memory --- not the algorithm expressed over it --- is
@@ -213,7 +213,7 @@ across a cleanup pass.
 \label{sec:sqrtform}
 
 The EKF update is restructured following sqrtVINS's \cite{peng2025sqrtvins}
-central principle --- never invert what can be factored. With innovation
+central principle: never invert what can be factored. With innovation
 covariance $S = H_{\text{stack}} P H_{\text{stack}}^\top + R$, the
 conventional form computes $S^{-1}$ explicitly (an $m^3$ solve against the
 identity) and then $K = M_a S^{-1}$ as a separate dense product. Writing
@@ -223,7 +223,7 @@ K M_a^\top = M_a S^{-1} M_a^\top = (M_a L^{-\top})(M_a L^{-\top})^\top = GG^\top
 \end{equation}
 so the explicit inverse and the separate $K$ product both disappear, and the
 covariance update becomes a symmetric rank-$k$ update on the upper triangle
-of $P$. This is not only faster: it also eliminates a real correctness
+of $P$. This is faster, and it also eliminates a real correctness
 defect present in an earlier, dense form of this update. $K M_a^\top$ is
 symmetric in exact arithmetic but not in floating point, and collapsing the
 update to the dense form \texttt{Cov -= K * M\_a.transpose()} allows that
@@ -489,7 +489,7 @@ latency number, and it is measured, not argued.
 \includegraphics[width=0.9\columnwidth]{figs/tradeoff.png}
 \caption{The accuracy/efficiency trade-off per sequence, x86: mean
 per-frame latency (y) against ATE (x). DODVins's points sit below
-OpenVINS's on every sequence at statistically equal accuracy --- the
+OpenVINS's on every sequence at statistically equal accuracy; the
 speedup does not purchase accuracy anywhere on the benchmark.}
 \label{fig:tradeoff}
 \end{figure}
@@ -576,8 +576,7 @@ evaluation would not have found: none fired on the ten benchmarked
 sequences, and none moved a single ATE digit when fixed. An IMU ring buffer
 discarded the \emph{newest} sample once full, so a sequence whose
 initializer had not fired within 10{,}000 samples ($\approx$50\,s at
-200\,Hz) would freeze permanently --- a silent initialization failure with
-no counter to make it visible. An IMU-window selection routine silently
+200\,Hz) would freeze permanently, with no counter to make the failure visible. An IMU-window selection routine silently
 truncated at a scratch-buffer capacity and returned success. A propagation
 step's boolean failure return was discarded by its caller, so a
 non-advancing timestamp (reachable on a live sensor feed, never in bag
@@ -595,8 +594,8 @@ find defects that only manifest under input it does not produce.
 To test the design where memory layout is supposed to matter most, both
 estimators were built and run on an NVIDIA Jetson Orin Nano Super (6-core
 Cortex-A78AE, 8\,GB LPDDR5, JetPack~6 / L4T~R36.4). Both were compiled inside
-an aarch64 Ubuntu~20.04 container with GCC~9.4.0 and OpenCV~4.2.0 --- the
-\emph{identical toolchain} as the x86 container of Section~\ref{sec:setup} ---
+an aarch64 Ubuntu~20.04 container with GCC~9.4.0 and OpenCV~4.2.0, the
+\emph{identical toolchain} as the x86 container of Section~\ref{sec:setup},
 so that the only variable between the two platforms' results is the
 processor. All ten benchmark sequences were run on-device for both
 estimators through the same direct-rosbag transport as x86, and every run
@@ -687,9 +686,9 @@ solve (SSE2 vs.\ NEON reduction order), not an algorithmic error. The
 tolerance was widened to $3\times10^{-3}$, with the measured spread that
 justifies the new value recorded alongside it; the fix was verified not to
 move the eigenvalue selected, the $|g|$ residual's sign, or the ten
-sequences' ATEs on x86 (this path is unreached on all ten). We report this
-not because it is dramatic --- it affected a fallback of a fallback that
-Table~\ref{tab:ate}'s benchmark never exercises --- but because it is
+sequences' ATEs on x86 (this path is unreached on all ten). We report it
+even though it affected a fallback of a fallback that
+Table~\ref{tab:ate}'s benchmark never exercises, because it is
 exactly the kind of defect a same-platform test suite cannot find, and one
 we would not have found without attempting the embedded deployment this
 section reports.
@@ -745,12 +744,12 @@ no sequence was tuned for.}
 Table~\ref{tab:tumvi} and Figure~\ref{fig:tumvi} show the outcome: all six
 room sequences initialize and converge with zero retuning, at accuracy
 parity with OpenVINS (better on 3 of 6, mean 0.062\,m against 0.063\,m),
-and with statistically indistinguishable drift --- the 1\,s-window relative
+and with statistically indistinguishable drift: the 1\,s-window relative
 pose error (Section~\ref{sec:rpe}'s metric) is 0.0064--0.0101\,m for the
 DODVins against 0.0053--0.0101\,m for OpenVINS across the six
 sequences. For a pipeline whose every constant was inherited from EuRoC
-and KAIST, converging untuned on a third dataset family --- different
-camera model, different IMU, different scene scale --- is the strongest
+and KAIST, converging untuned on a third dataset family (different camera
+model, different IMU, different scene scale) is the strongest
 available evidence that the estimator is not overfit to its benchmarks.
 
 \section{Limitations}
@@ -810,7 +809,7 @@ time window both configurations cover, to rule out a scoring artifact:
 infinity, both roughly 24\% worse), and was reverted. We report the negative
 result rather than omit it: the correct fix requires replicating
 OpenVINS's paired zero-velocity-update configuration for this specific
-sequence, which is unimplemented, not merely untried.
+sequence, which remains unimplemented.
 
 \section{Conclusion}
 
@@ -831,14 +830,14 @@ three plausible-sounding but wrong hypotheses about where the pipeline's
 time was going are reported alongside the ones that were right, because on
 this codebase guessing has been a worse strategy than profiling. The
 embedded deployment (Section~\ref{sec:embedded}) shows the advantage
-transfers in direction but not in size --- faster on all ten sequences on
-the Orin Nano, by a narrower margin than on desktop x86 --- and surfaced a
+transfers in direction but not in size (faster on all ten sequences on
+the Orin Nano, by a narrower margin than on desktop x86) and surfaced a
 genuine cross-platform floating-point defect in an otherwise-unreached code
 path, illustrating that even a same-architecture, bit-identical-trajectory
 validation regime does not by itself certify cross-platform correctness.
 Finally, an untuned run on the TUM VI benchmark
-(Section~\ref{sec:tumvi}) --- a third dataset family and the first fisheye
-camera model --- converges on all six room sequences at parity with
+(Section~\ref{sec:tumvi}), a third dataset family and the first fisheye
+camera model, converges on all six room sequences at parity with
 OpenVINS, evidence that the estimator is not overfit to the datasets its
 constants were tuned on.
 
